@@ -1,0 +1,19 @@
+# Dependencies
+backend/node_modules/
+extension/node_modules/
+
+# Environment variables (NEVER push this)
+backend/.env
+
+# Compiled extension
+extension/out/
+
+# Logs
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# VS Code test files
+.vscode-test/
