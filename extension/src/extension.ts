@@ -37,7 +37,7 @@ export function activate(context: vscode.ExtensionContext) {
 
         // 3. Ask user for target language
         const targetLanguage = await vscode.window.showQuickPick(
-          ['Kannada', 'Hindi'],
+          ['Kannada', 'Hindi', 'English'],
           {
             placeHolder: 'Select explanation language'
           }

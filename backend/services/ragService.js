@@ -1,9 +1,8 @@
 const chromaService = require("./chromaService");
-const embeddingService = require("./embeddingService");
 const aiService = require("./aiService");
 const { SIMILARITY_THRESHOLD } = require("../config/config");
 
-// Processes an error request using a mock RAG flow.
+// Process an error request using the RAG pipeline
 const processError = async (requestData) => {
   const { error, code, language, targetLanguage } = requestData;
 
@@ -15,30 +14,20 @@ const processError = async (requestData) => {
   };
 
   try {
-    let embedding = null;
     let similarResult = null;
 
-    // Step 1: Create embedding from the error text (mock service).
+    // Step 1: Search similar errors from ChromaDB
     try {
-      embedding = await embeddingService.getEmbedding(error);
-    } catch (embeddingError) {
-      console.error("Embedding step failed:", embeddingError);
+      similarResult = await chromaService.searchSimilar(error, language);
+    } catch (searchError) {
+      console.error("ChromaDB search failed:", searchError);
     }
 
-    // Step 2: Search similar errors from mock ChromaDB.
-    if (embedding) {
-      try {
-        similarResult = await chromaService.searchSimilar(embedding);
-      } catch (searchError) {
-        console.error("Chroma search failed:", searchError);
-      }
-    }
-
-    // Step 3: If similarity passes threshold, translate and return DB result.
+    // Step 2: If a good match exists, translate/use the stored explanation
     if (
       similarResult &&
-      typeof similarResult.similarity === "number" &&
-      similarResult.similarity >= SIMILARITY_THRESHOLD
+      (similarResult.distance === null ||
+        similarResult.distance <= SIMILARITY_THRESHOLD)
     ) {
       const translatedResult = await aiService.generateExplanation({
         error,
@@ -48,14 +37,19 @@ const processError = async (requestData) => {
         baseExplanation: similarResult.explanation,
         baseFix: similarResult.fix
       });
+
       return {
-        explanation: translatedResult.explanation,
-        fix: translatedResult.fix,
-        source: "ChromaDB"
-      };
+  explanation: translatedResult.explanation,
+  fix: translatedResult.fix,
+  source: "ChromaDB",
+  matchedError: similarResult.matchedError,
+  similarity: similarResult.distance !== null
+    ? Math.max(0, Math.min(100, Math.round((1 - similarResult.distance) * 100)))
+    : null
+};
     }
 
-    // Step 4: Fallback to AI generation (mock service).
+    // Step 3: Otherwise generate a new explanation
     const aiResult = await aiService.generateExplanation({
       error,
       code,
@@ -69,7 +63,7 @@ const processError = async (requestData) => {
       source: "AI"
     };
 
-    // Step 5: Optionally store new AI result for future retrieval.
+    // Step 4: Store new result for future retrieval
     try {
       await chromaService.storeResult({
         error,
@@ -78,13 +72,13 @@ const processError = async (requestData) => {
         fix: aiResult.fix
       });
     } catch (storeError) {
-      console.error("Store result skipped due to error:", storeError);
+      console.error("Store result skipped:", storeError);
     }
 
     return response;
 
-  } catch (error) {
-    console.error("RAG pipeline failed:", error);
+  } catch (err) {
+    console.error("RAG pipeline failed:", err);
     return safeFallback;
   }
 };
