@@ -1,7 +1,3 @@
-/**
- * Sends extracted error data to the backend explain endpoint.
- */
-
 export async function sendToBackend(data: {
   errorMessage: string;
   code: string;
@@ -10,6 +6,7 @@ export async function sendToBackend(data: {
 }): Promise<{
   explanation: string;
   fix: string;
+  remember?: string | null;
   source: string;
   matchedError?: string;
   similarity?: number | null;
@@ -39,6 +36,7 @@ export async function sendToBackend(data: {
     return {
       explanation: result.explanation,
       fix: result.fix,
+      remember: result.remember,
       source: result.source,
       matchedError: result.matchedError,
       similarity: result.similarity,

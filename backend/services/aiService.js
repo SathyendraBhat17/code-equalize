@@ -32,13 +32,14 @@ const generateExplanation = async ({
           content: prompt,
         },
       ],
-      temperature: 0.3,
+      temperature: 0.5,
     });
 
     const text = completion.choices[0].message.content;
 
     const explanationMatch = text.match(/Explanation:\s*(.+?)(?=Fix:|$)/s);
-    const fixMatch = text.match(/Fix:\s*(.+?)$/s);
+    const fixMatch = text.match(/Fix:\s*(.+?)(?=Remember:|$)/s);
+    const rememberMatch = text.match(/Remember:\s*(.+?)$/s);
 
     const explanation = explanationMatch
       ? explanationMatch[1].trim()
@@ -48,7 +49,12 @@ const generateExplanation = async ({
       ? fixMatch[1].trim()
       : "Check the error and review related code lines.";
 
-    return { explanation, fix };
+    const remember = rememberMatch
+      ? rememberMatch[1].trim()
+      : null;
+
+    return { explanation, fix, remember };
+
   } catch (err) {
     console.error("Groq API call failed:", err);
     throw err;
