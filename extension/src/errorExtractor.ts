@@ -25,8 +25,8 @@ export function extractError(): {
 
   const diagnostic = errorDiagnostics[0];
   const errorLine = diagnostic.range.start.line;
-  const startLine = Math.max(0, errorLine - 2);
-  const endLine = Math.min(editor.document.lineCount - 1, errorLine + 2);
+  const startLine = 0;
+  const endLine = editor.document.lineCount - 1;
 
   const codeLines: string[] = [];
   for (let line = startLine; line <= endLine; line += 1) {
