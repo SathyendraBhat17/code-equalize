@@ -10,6 +10,10 @@ Programming errors are often difficult for beginners to understand because compi
 
 Code Equalize uses AI to analyze errors, provide context-aware explanations, and present them in a user's preferred language while preserving technical accuracy. The goal is to make debugging more accessible, educational, and beginner-friendly.
 
+## 🎥 Demo
+
+![Code Equalize Demo](./CODE-EQUALIZE.gif)
+
 ## Features
 
 * AI-assisted debugging and error analysis
