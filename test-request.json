@@ -1,0 +1,7 @@
+{
+  "error": "NullPointerException",
+  "code": "String x = null; System.out.println(x);",
+  "language": "Java",
+  "targetLanguage": "English",
+  "errorType": "runtime"
+}

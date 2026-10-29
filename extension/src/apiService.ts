@@ -3,6 +3,7 @@ export async function sendToBackend(data: {
   code: string;
   language: string;
   targetLanguage: string;
+  errorType?: 'diagnostic' | 'runtime';
 }): Promise<{
   explanation: string;
   fix: string;
@@ -12,7 +13,7 @@ export async function sendToBackend(data: {
   similarity?: number | null;
 }> {
   try {
-    const response = await fetch("http://localhost:3000/explain", {
+    const response = await fetch("http://127.0.0.1:3000/explain", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -22,16 +23,17 @@ export async function sendToBackend(data: {
         code: data.code,
         language: data.language,
         targetLanguage: data.targetLanguage,
+        errorType: data.errorType ?? 'diagnostic',
       }),
     });
 
-    if (!response.ok) {
-      throw new Error(
-        `Backend request failed with status ${response.status}`
-      );
-    }
-
     const result = await response.json();
+    if (!response.ok) {
+      const message = typeof result?.error === "string"
+        ? result.error
+        : `Backend request failed with status ${response.status}`;
+      throw new Error(message);
+    }
 
     return {
       explanation: result.explanation,

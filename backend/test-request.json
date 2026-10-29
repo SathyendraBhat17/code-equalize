@@ -1,0 +1,7 @@
+﻿{
+  "error": "NullPointerException",
+  "code": "public class RuntimeTest { public static void main(String[] args) { String studentName = null; System.out.println(studentName.length()); } }",
+  "language": "Java",
+  "targetLanguage": "English",
+  "errorType": "runtime"
+}

@@ -10,7 +10,10 @@
     "Other"
   ],
   "activationEvents": [
-    "onCommand:code-equalize.explain"
+    "onCommand:code-equalize.explain",
+    "onDebug",
+    "onDebugResolve:java",
+    "onDebugResolve:debugpy"
   ],
   "main": "./out/extension.js",
   "contributes": {

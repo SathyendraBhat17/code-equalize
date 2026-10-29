@@ -15,11 +15,19 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY || "";
 const GROQ_API_KEY = process.env.GROQ_API_KEY || "";
 
 // Supported Languages
-const SUPPORTED_LANGUAGES = ["Java", "Python"];
+const SUPPORTED_LANGUAGES = ["Java", "Python", "C", "C++"];
 const SUPPORTED_TARGET_LANGUAGES = [
-  "Kannada",
+  "English",
   "Hindi",
-  "English"
+  "Bengali",
+  "Marathi",
+  "Telugu",
+  "Tamil",
+  "Gujarati",
+  "Urdu",
+  "Kannada",
+  "Odia",
+  "Malayalam"
 ];
 
 module.exports = {
