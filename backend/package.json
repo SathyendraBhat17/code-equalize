@@ -1,19 +1,21 @@
+
 {
-    "name": "code-equalize-backend",
-    "version": "1.0.0",
-    "description": "Backend API for Code-Equalize (mock RAG mode)",
-    "main": "server.js",
-    "scripts": {
-        "start": "node server.js",
-        "dev": "node --watch server.js"
-    },
-    "dependencies": {
-        "@chroma-core/default-embed": "^0.1.9",
-        "@google/generative-ai": "^0.24.1",
-        "chromadb": "^3.5.0",
-        "cors": "^2.8.5",
-        "dotenv": "^16.4.5",
-        "express": "^4.19.2",
-        "groq-sdk": "^1.4.0"
-    }
+  "name": "code-equalize-backend",
+  "version": "1.0.0",
+  "description": "Backend API for Code Equalize with Groq and ChromaDB-powered RAG",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@chroma-core/default-embed": "^0.1.9",
+    "@google/generative-ai": "^0.24.1",
+    "chromadb": "^3.5.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "groq-sdk": "^1.4.0"
+  }
 }

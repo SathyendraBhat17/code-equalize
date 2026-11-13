@@ -3,6 +3,7 @@
   "displayName": "code-equalize",
   "description": "Explains code errors and suggests fixes in your native language",
   "version": "0.0.1",
+  "icon": "media/code-equalize-icon.png",
   "engines": {
     "vscode": "^1.118.0"
   },
@@ -28,6 +29,7 @@
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
+    "test:unit": "npm run compile && node --test test/*.test.cjs",
     "pretest": "npm run compile && npm run lint",
     "lint": "eslint src",
     "test": "vscode-test"

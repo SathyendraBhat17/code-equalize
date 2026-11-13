@@ -1,1061 +1,2716 @@
-// import * as vscode from "vscode";
+import * as vscode from 'vscode';
 
-// type PanelData = {
-//   explanation: string;
-//   fix: string;
-//   remember?: string | null;
-//   source: "AI" | "ChromaDB" | string;
-//   matchedError?: string;
-//   similarity?: number | null;
-//   errorType?: 'diagnostic' | 'runtime';
-// };
+export type PanelErrorType =
+  | 'diagnostic'
+  | 'runtime'
+  | 'potential';
 
-// export function showPanel(data: PanelData): void {
-//   const panel = vscode.window.createWebviewPanel(
-//     "codeEqualize",
-//     "Code Equalize",
-//     vscode.ViewColumn.Beside,
-//     { enableScripts: true }
-//   );
-//   panel.webview.html = getWebviewContent(data);
-// }
-
-// function escapeHtml(text: string): string {
-//   return text
-//     .replace(/&/g, "&amp;")
-//     .replace(/</g, "&lt;")
-//     .replace(/>/g, "&gt;");
-// }
-
-// /**
-//  * Renders markdown to HTML.
-//  * Code blocks (``` ... ```) get a copy button injected.
-//  */
-// function renderMarkdown(text: string): string {
-//   if (!text) return "";
-
-//   // We'll process code blocks separately (before escaping the rest)
-//   // Split on fenced code blocks first
-//   const parts: string[] = [];
-//   let codeBlockIndex = 0;
-//   const codeBlockRegex = /```[\w]*\n?([\s\S]*?)```/g;
-//   let lastIndex = 0;
-//   let match: RegExpExecArray | null;
-
-//   while ((match = codeBlockRegex.exec(text)) !== null) {
-//     // plain text before this block
-//     const before = text.slice(lastIndex, match.index);
-//     parts.push({ type: 'text', content: before } as any);
-//     parts.push({ type: 'code', content: match[1], index: codeBlockIndex++ } as any);
-//     lastIndex = match.index + match[0].length;
-//   }
-//   // remaining text
-//   parts.push({ type: 'text', content: text.slice(lastIndex) } as any);
-
-//   return (parts as any[]).map((part) => {
-//     if (part.type === 'code') {
-//       const escaped = escapeHtml(part.content.trimEnd());
-//       // Encode for data attribute (base64-safe via encodeURIComponent)
-//       const encoded = encodeURIComponent(part.content.trimEnd());
-//       return `<div class="code-block-wrap">
-//   <button class="copy-btn" onclick="copyCode(this, '${encoded}')" title="Copy code">
-//     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-//       <rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
-//     </svg>
-//     Copy
-//   </button>
-//   <pre><code>${escaped}</code></pre>
-// </div>`;
-//     } else {
-//       // normal text: escape then light markdown
-//       const escaped = escapeHtml(part.content);
-//       return escaped
-//         .replace(/`([^`]+)`/g, "<code class=\"inline\">$1</code>")
-//         .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
-//         .replace(/\n/g, "<br>");
-//     }
-//   }).join('').trim();
-// }
-
-// function getWebviewContent(data: PanelData): string {
-//   const isChroma = data.source === "ChromaDB";
-//   const isRuntime = data.errorType === "runtime";
-
-//   const errorTypeTooltip = isRuntime
-//     ? "Runtime Error: occurs while the program is running — e.g. null pointer, division by zero, stack overflow."
-//     : "Diagnostic Error: caught by the language server before your code runs — e.g. syntax error or type mismatch.";
-
-//   const sourceTooltip = isChroma
-//     ? "ChromaDB: explanation retrieved from the local error knowledge base using vector similarity search. A past solution matched your error."
-//     : "AI Generated: no close match in the knowledge base, so Groq AI (LLaMA) generated this explanation fresh from your code.";
-
-//   const errorTypeBadge = isRuntime
-//     ? `<span class="badge badge-runtime" data-tooltip="${errorTypeTooltip}">⚡ Runtime Error</span>`
-//     : `<span class="badge badge-diagnostic" data-tooltip="${errorTypeTooltip}">🔍 Diagnostic Error</span>`;
-
-//   const sourceBadge = isChroma
-//     ? `<span class="badge badge-chroma" data-tooltip="${sourceTooltip}">📚 ChromaDB</span>`
-//     : `<span class="badge badge-ai" data-tooltip="${sourceTooltip}">🤖 AI Generated</span>`;
-
-//   const matchedHtml = isChroma && data.matchedError
-//     ? `<div class="matched-bar">
-//         <span class="matched-dot"></span>
-//         <span class="matched-label">Matched:</span>
-//         <code class="matched-value">${escapeHtml(data.matchedError)}</code>
-//        </div>`
-//     : "";
-
-//   const rememberHtml = data.remember
-//     ? `<div class="section">
-//         <div class="section-label amber-label">
-//           <span class="label-icon">💡</span>
-//           <span>Remember for Next Time</span>
-//         </div>
-//         <div class="card card-remember">${renderMarkdown(data.remember)}</div>
-//        </div>`
-//     : "";
-
-//   const fixHtml = renderMarkdown(data.fix);
-
-//   return `<!DOCTYPE html>
-// <html lang="en">
-// <head>
-// <meta charset="UTF-8">
-// <meta name="viewport" content="width=device-width, initial-scale=1.0">
-// <style>
-//   :root {
-//     --bg:             var(--vscode-editor-background);
-//     --fg:             var(--vscode-editor-foreground);
-//     --fg-muted:       var(--vscode-descriptionForeground, #8b949e);
-//     --border:         var(--vscode-panel-border, rgba(128,128,128,.18));
-//     --surface:        var(--vscode-editorWidget-background, rgba(128,128,128,.06));
-//     --code-bg:        var(--vscode-textCodeBlock-background, rgba(0,0,0,.22));
-//     --blue:           #4FC1FF;
-//     --blue-dim:       rgba(79,193,255,.10);
-//     --blue-border:    rgba(79,193,255,.28);
-//     --blue-label:     rgba(79,193,255,.15);
-//     --green:          #4EC994;
-//     --green-dim:      rgba(78,201,148,.10);
-//     --green-border:   rgba(78,201,148,.28);
-//     --green-label:    rgba(78,201,148,.15);
-//     --amber:          #E5A11C;
-//     --amber-dim:      rgba(229,161,28,.10);
-//     --amber-border:   rgba(229,161,28,.28);
-//     --amber-label:    rgba(229,161,28,.15);
-//     --purple:         #C586C0;
-//     --purple-dim:     rgba(197,134,192,.10);
-//     --purple-border:  rgba(197,134,192,.28);
-//     --radius:         9px;
-//     --font-ui:        var(--vscode-font-family, -apple-system, "Segoe UI", sans-serif);
-//     --font-mono:      var(--vscode-editor-font-family, "Cascadia Code", Consolas, monospace);
-//   }
-
-//   * { box-sizing: border-box; margin: 0; padding: 0; }
-//   body {
-//     font-family: var(--font-ui);
-//     font-size: 13.5px;
-//     background: var(--bg);
-//     color: var(--fg);
-//     line-height: 1.75;
-//     padding-bottom: 48px;
-//   }
-
-//   /* ── Header ── */
-//   .header {
-//     padding: 18px 20px 16px;
-//     border-bottom: 1px solid var(--border);
-//     background: linear-gradient(135deg,
-//       rgba(79,193,255,.06) 0%,
-//       rgba(78,201,148,.04) 60%,
-//       transparent 100%);
-//   }
-//   .header-top {
-//     display: flex;
-//     align-items: center;
-//     justify-content: space-between;
-//     gap: 10px; flex-wrap: wrap;
-//     margin-bottom: 12px;
-//   }
-//   .header-title {
-//     display: flex; align-items: center; gap: 10px;
-//     font-size: 16px; font-weight: 700; letter-spacing: -.025em;
-//   }
-//   .logo-icon {
-//     width: 32px; height: 32px; border-radius: 8px;
-//     background: linear-gradient(135deg, var(--blue-dim), var(--green-dim));
-//     border: 1px solid var(--blue-border);
-//     display: flex; align-items: center; justify-content: center;
-//     font-size: 16px; flex-shrink: 0;
-//   }
-//   .header-badges { display: flex; gap: 7px; flex-wrap: wrap; }
-
-//   /* ── Badges ── */
-//   .badge {
-//     position: relative;
-//     display: inline-flex; align-items: center; gap: 5px;
-//     padding: 4px 11px; border-radius: 99px;
-//     font-size: 11px; font-weight: 600; letter-spacing: .03em;
-//     border: 1px solid transparent;
-//     cursor: default;
-//     transition: filter .15s, transform .15s;
-//     user-select: none;
-//   }
-//   .badge:hover { filter: brightness(1.15); transform: translateY(-1px); }
-//   .badge-runtime    { color: var(--amber);  background: var(--amber-dim);  border-color: var(--amber-border); }
-//   .badge-diagnostic { color: var(--blue);   background: var(--blue-dim);   border-color: var(--blue-border); }
-//   .badge-chroma     { color: var(--green);  background: var(--green-dim);  border-color: var(--green-border); }
-//   .badge-ai         { color: var(--purple); background: var(--purple-dim); border-color: var(--purple-border); }
-
-//   /* tooltip */
-//   .badge::after {
-//     content: attr(data-tooltip);
-//     position: absolute; top: calc(100% + 7px); right: 0;
-//     width: 230px;
-//     background: var(--vscode-editorHoverWidget-background, #1e1e2e);
-//     color: var(--fg); border: 1px solid var(--border);
-//     border-radius: 7px; padding: 9px 12px;
-//     font-size: 11.5px; font-weight: 400; line-height: 1.55;
-//     letter-spacing: 0; white-space: normal;
-//     z-index: 99; opacity: 0; pointer-events: none;
-//     transform: translateY(4px);
-//     transition: opacity .18s, transform .18s;
-//     box-shadow: 0 4px 18px rgba(0,0,0,.35);
-//   }
-//   .badge:hover::after { opacity: 1; transform: translateY(0); }
-
-//   /* ── Matched bar ── */
-//   .matched-bar {
-//     display: flex; align-items: center; gap: 8px;
-//     padding: 8px 13px; border-radius: var(--radius);
-//     background: var(--green-dim); border: 1px solid var(--green-border);
-//     font-size: 12px;
-//   }
-//   .matched-dot {
-//     width: 7px; height: 7px; border-radius: 50%;
-//     background: var(--green); box-shadow: 0 0 6px var(--green); flex-shrink: 0;
-//   }
-//   .matched-label { color: var(--fg-muted); font-weight: 600; flex-shrink: 0; }
-//   .matched-value {
-//     font-family: var(--font-mono); font-size: 11.5px; color: var(--green);
-//     background: none; border: none; padding: 0;
-//   }
-
-//   /* ── Body ── */
-//   .body { padding: 20px 20px 0; display: flex; flex-direction: column; gap: 20px; }
-
-//   /* ── Section label pills ── */
-//   .section-label {
-//     display: flex; align-items: center; gap: 8px;
-//     margin-bottom: 9px;
-//     font-size: 10.5px; font-weight: 700; letter-spacing: .1em;
-//     text-transform: uppercase;
-//     padding: 5px 10px; border-radius: 6px; width: fit-content;
-//     color: var(--fg-muted);
-//     background: var(--surface); border: 1px solid var(--border);
-//   }
-//   .blue-label  { color: var(--blue);  background: var(--blue-label);  border-color: var(--blue-border); }
-//   .green-label { color: var(--green); background: var(--green-label); border-color: var(--green-border); }
-//   .amber-label { color: var(--amber); background: var(--amber-label); border-color: var(--amber-border); }
-//   .label-icon { font-size: 13px; }
-
-//   /* ── Cards ── */
-//   .card {
-//     background: var(--surface); border: 1px solid var(--border);
-//     border-radius: var(--radius); padding: 15px 18px;
-//     font-size: 13.5px; line-height: 1.8;
-//     transition: border-color .2s;
-//   }
-//   .card:hover { border-color: rgba(128,128,128,.32); }
-//   .card-explanation {
-//     border-left: 3px solid var(--blue);
-//     background: var(--blue-dim); border-color: var(--blue-border);
-//   }
-//   .card-fix {
-//     border-left: 3px solid var(--green);
-//     background: var(--green-dim); border-color: var(--green-border);
-//   }
-//   .card-remember {
-//     border-left: 3px solid var(--amber);
-//     background: var(--amber-dim); border-color: var(--amber-border);
-//   }
-
-//   /* ── Code blocks with copy button ── */
-//   .code-block-wrap {
-//     position: relative;
-//     margin: 12px 0 4px;
-//   }
-//   .code-block-wrap pre {
-//     margin: 0;
-//     background: var(--code-bg);
-//     border: 1px solid var(--border);
-//     border-radius: var(--radius);
-//     padding: 13px 15px;
-//     overflow-x: auto;
-//     font-size: 12.5px; line-height: 1.6;
-//     padding-top: 38px; /* room for copy button */
-//   }
-//   .copy-btn {
-//     position: absolute;
-//     top: 8px; right: 8px;
-//     display: inline-flex; align-items: center; gap: 5px;
-//     padding: 4px 10px;
-//     background: var(--surface);
-//     border: 1px solid var(--border);
-//     border-radius: 5px;
-//     color: var(--fg-muted);
-//     font-family: var(--font-ui);
-//     font-size: 11px; font-weight: 600;
-//     cursor: pointer;
-//     transition: background .15s, color .15s, border-color .15s;
-//     z-index: 2;
-//   }
-//   .copy-btn:hover {
-//     background: var(--green-dim);
-//     color: var(--green);
-//     border-color: var(--green-border);
-//   }
-//   .copy-btn.copied {
-//     background: var(--green-dim);
-//     color: var(--green);
-//     border-color: var(--green-border);
-//   }
-
-//   code { font-family: var(--font-mono); font-size: 12.5px; }
-//   code.inline {
-//     background: rgba(128,128,128,.14);
-//     padding: 2px 6px; border-radius: 4px;
-//     font-size: 12px; border: 1px solid var(--border);
-//   }
-//   pre code { background: none; border: none; padding: 0; }
-
-//   /* ── Fix locked state ── */
-//   .fix-locked {
-//     border-radius: var(--radius);
-//     border: 1px dashed var(--border);
-//     background: var(--surface);
-//     padding: 26px 20px 22px; text-align: center;
-//   }
-//   .countdown-ring {
-//     position: relative; width: 72px; height: 72px; margin: 0 auto 14px;
-//   }
-//   .countdown-ring svg { transform: rotate(-90deg); }
-//   .countdown-ring .track { fill: none; stroke: var(--border); stroke-width: 4; }
-//   .countdown-ring .progress {
-//     fill: none; stroke: var(--green); stroke-width: 4;
-//     stroke-linecap: round; stroke-dasharray: 188.5; stroke-dashoffset: 0;
-//     transition: stroke-dashoffset 1s linear, stroke .4s;
-//   }
-//   .countdown-number {
-//     position: absolute; inset: 0;
-//     display: flex; align-items: center; justify-content: center;
-//     font-size: 21px; font-weight: 700; color: var(--green);
-//     font-variant-numeric: tabular-nums; transition: color .4s;
-//   }
-//   .fix-locked-title { font-size: 13.5px; font-weight: 600; margin-bottom: 5px; }
-//   .fix-locked-sub {
-//     font-size: 12px; color: var(--fg-muted); line-height: 1.6;
-//     max-width: 270px; margin: 0 auto;
-//   }
-//   .fix-progress-bar {
-//     height: 2px; border-radius: 99px;
-//     background: var(--border); margin-top: 16px; overflow: hidden;
-//   }
-//   .fix-progress-fill {
-//     height: 100%; width: 100%;
-//     background: linear-gradient(90deg, var(--blue), var(--green));
-//     border-radius: 99px; transform-origin: left; transform: scaleX(1);
-//     transition: transform 1s linear;
-//   }
-
-//   /* ── Toggle dropdown button (shown after timer) ── */
-//   .fix-toggle-btn {
-//     display: none;
-//     width: 100%;
-//     align-items: center;
-//     justify-content: space-between;
-//     padding: 12px 18px;
-//     border-radius: var(--radius);
-//     border: 1px solid var(--green-border);
-//     background: var(--green-dim);
-//     color: var(--green);
-//     font-family: var(--font-ui);
-//     font-size: 13.5px; font-weight: 600;
-//     cursor: pointer;
-//     transition: background .2s, box-shadow .2s;
-//     letter-spacing: .01em;
-//   }
-//   .fix-toggle-btn:hover {
-//     background: rgba(78,201,148,.2);
-//     box-shadow: 0 0 14px rgba(78,201,148,.18);
-//   }
-//   .fix-toggle-btn.visible { display: flex; }
-//   .fix-toggle-left { display: flex; align-items: center; gap: 8px; }
-//   .fix-toggle-chevron {
-//     display: inline-flex;
-//     transition: transform .3s ease;
-//     flex-shrink: 0;
-//   }
-//   .fix-toggle-chevron.open { transform: rotate(180deg); }
-
-//   /* ── Fix card collapsible wrapper ── */
-//   .fix-collapse {
-//     display: grid;
-//     grid-template-rows: 0fr;
-//     transition: grid-template-rows .3s ease;
-//     margin-top: 8px;
-//   }
-//   .fix-collapse.open { grid-template-rows: 1fr; }
-//   .fix-collapse-inner { overflow: hidden; }
-
-//   /* ── Footer ── */
-//   .footer {
-//     margin-top: 28px; padding: 13px 20px 0;
-//     border-top: 1px solid var(--border);
-//     display: flex; align-items: center; justify-content: center;
-//     gap: 8px; font-size: 11px; color: var(--fg-muted);
-//     opacity: .5; letter-spacing: .05em;
-//   }
-// </style>
-// </head>
-// <body>
-
-// <div class="header">
-//   <div class="header-top">
-//     <div class="header-title">
-//       <div class="logo-icon">⚖️</div>
-//       Code Equalize
-//     </div>
-//     <div class="header-badges">
-//       ${errorTypeBadge}
-//       ${sourceBadge}
-//     </div>
-//   </div>
-//   ${matchedHtml}
-// </div>
-
-// <div class="body">
-
-//   <!-- Why This Happened -->
-//   <div class="section">
-//     <div class="section-label blue-label">
-//       <span class="label-icon">🤔</span>
-//       <span>Why This Happened</span>
-//     </div>
-//     <div class="card card-explanation">${renderMarkdown(data.explanation)}</div>
-//   </div>
-
-//   <!-- How to Fix It -->
-//   <div class="section">
-//     <div class="section-label green-label">
-//       <span class="label-icon">🛠️</span>
-//       <span>How to Fix It</span>
-//     </div>
-
-//     <!-- Locked (countdown) -->
-//     <div class="fix-locked" id="fixLocked">
-//       <div class="countdown-ring">
-//         <svg width="72" height="72" viewBox="0 0 72 72">
-//           <circle class="track"    cx="36" cy="36" r="30"/>
-//           <circle class="progress" id="progressCircle" cx="36" cy="36" r="30"/>
-//         </svg>
-//         <div class="countdown-number" id="countdownNum">15</div>
-//       </div>
-//       <div class="fix-locked-title">Code Fix is locked 🔒</div>
-//       <div class="fix-locked-sub">Read the explanation above first.<br>The fix unlocks in a moment.</div>
-//       <div class="fix-progress-bar">
-//         <div class="fix-progress-fill" id="progressBar"></div>
-//       </div>
-//     </div>
-
-//     <!-- Toggle dropdown button -->
-//     <button class="fix-toggle-btn" id="toggleBtn" onclick="toggleFix()">
-//       <span class="fix-toggle-left">
-//         <span id="toggleLabel">✅ Show Code Fix</span>
-//       </span>
-//       <span class="fix-toggle-chevron" id="toggleChevron">
-//         <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
-//              stroke="currentColor" stroke-width="2.5"
-//              stroke-linecap="round" stroke-linejoin="round">
-//           <polyline points="6 9 12 15 18 9"/>
-//         </svg>
-//       </span>
-//     </button>
-
-//     <!-- Collapsible fix content -->
-//     <div class="fix-collapse" id="fixCollapse">
-//       <div class="fix-collapse-inner">
-//         <div class="card card-fix">
-//           ${fixHtml}
-//         </div>
-//       </div>
-//     </div>
-//   </div>
-
-//   <!-- Remember -->
-//   ${rememberHtml}
-
-// </div>
-
-// <div class="footer">⚖️ &nbsp;The compiler complained. We explained.</div>
-
-// <script>
-//   /* ── Countdown ── */
-//   const TOTAL = 15;
-//   let remaining = TOTAL;
-//   const circle   = document.getElementById('progressCircle');
-//   const numEl    = document.getElementById('countdownNum');
-//   const barEl    = document.getElementById('progressBar');
-//   const lockedEl = document.getElementById('fixLocked');
-//   const toggleBtn = document.getElementById('toggleBtn');
-//   const CIRCUMFERENCE = 2 * Math.PI * 30;
-
-//   circle.style.strokeDashoffset = '0';
-
-//   const timer = setInterval(() => {
-//     remaining--;
-//     const frac = remaining / TOTAL;
-//     circle.style.strokeDashoffset = CIRCUMFERENCE * (1 - frac);
-//     numEl.textContent = remaining;
-//     if (remaining <= 5) {
-//       circle.style.stroke = 'var(--amber)';
-//       numEl.style.color   = 'var(--amber)';
-//     }
-//     barEl.style.transform = 'scaleX(' + frac + ')';
-//     if (remaining <= 0) {
-//       clearInterval(timer);
-//       lockedEl.style.display = 'none';
-//       toggleBtn.classList.add('visible');
-//     }
-//   }, 1000);
-
-//   /* ── Toggle fix dropdown ── */
-//   let fixOpen = false;
-//   function toggleFix() {
-//     fixOpen = !fixOpen;
-//     const collapse  = document.getElementById('fixCollapse');
-//     const chevron   = document.getElementById('toggleChevron');
-//     const label     = document.getElementById('toggleLabel');
-//     collapse.classList.toggle('open', fixOpen);
-//     chevron.classList.toggle('open', fixOpen);
-//     label.textContent = fixOpen ? '🔼 Hide Code Fix' : '✅ Show Code Fix';
-//   }
-
-//   /* ── Per-block copy buttons ── */
-//   function copyCode(btn, encoded) {
-//     const text = decodeURIComponent(encoded);
-//     navigator.clipboard.writeText(text).then(() => {
-//       btn.classList.add('copied');
-//       const orig = btn.innerHTML;
-//       btn.innerHTML = \`<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 12 4 10"/><line x1="4" y1="10" x2="4" y2="18"/><polyline points="4 18 20 18"/></svg> Copied!\`;
-//       setTimeout(() => {
-//         btn.classList.remove('copied');
-//         btn.innerHTML = orig;
-//       }, 2000);
-//     }).catch(() => {
-//       // fallback for older webview contexts
-//       const ta = document.createElement('textarea');
-//       ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
-//       document.body.appendChild(ta); ta.select();
-//       document.execCommand('copy');
-//       document.body.removeChild(ta);
-//       btn.classList.add('copied');
-//       const orig = btn.innerHTML;
-//       btn.innerHTML = \`<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 12 4 10"/></svg> Copied!\`;
-//       setTimeout(() => { btn.classList.remove('copied'); btn.innerHTML = orig; }, 2000);
-//     });
-//   }
-// </script>
-
-// </body>
-// </html>`;
-// }
-
-import * as vscode from "vscode";
-
-type PanelData = {
-  explanation: string;
-  fix: string;
-  remember?: string | null;
-  source: "AI" | "ChromaDB" | string;
-  matchedError?: string;
-  similarity?: number | null;
-  errorType?: 'diagnostic' | 'runtime';
-  // New fields for location + language display
+export interface PanelError {
+  id?: string;
+  errorMessage: string;
   fileName?: string;
   lineNumber?: number;
-  targetLanguage?: string;
-};
-
-export function showPanel(data: PanelData): void {
-  const panel = vscode.window.createWebviewPanel(
-    "codeEqualize",
-    "Code Equalize",
-    vscode.ViewColumn.Beside,
-    { enableScripts: true }
-  );
-  panel.webview.html = getWebviewContent(data);
+  errorType?: PanelErrorType;
 }
 
-function escapeHtml(text: string): string {
-  return text
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
+export interface PanelExplanation extends PanelError {
+  id: string;
+  explanation: string;
+  source?: string;
+  matchedError?: string;
+  distance?: number | null;
+  failureMessage?: string;
 }
+
+export interface PanelData {
+  explanations: PanelExplanation[];
+  fix: string;
+  remember: string;
+  source?: string;
+  fileName?: string;
+  targetLanguage: string;
+  sourceLanguage: string;
+  errors?: PanelError[];
+}
+
+type LanguageChangeHandler = (
+  language: string,
+  requestId: string
+) => Promise<PanelData>;
+
+let currentPanel: vscode.WebviewPanel | undefined;
+let messageListener: vscode.Disposable | undefined;
+let panelSessionSequence = 0;
+
+const SUPPORTED_LANGUAGES = [
+  'English',
+  'Hindi',
+  'Bengali',
+  'Marathi',
+  'Telugu',
+  'Tamil',
+  'Gujarati',
+  'Urdu',
+  'Kannada',
+  'Odia',
+  'Malayalam'
+];
 
 /**
- * Renders markdown to HTML.
- * Code blocks get a per-block copy button.
+ * Escapes dynamic values before inserting them into HTML.
  */
-function renderMarkdown(text: string): string {
-  if (!text) return "";
-
-  const parts: { type: string; content: string; index?: number }[] = [];
-  let codeBlockIndex = 0;
-  const codeBlockRegex = /```[\w]*\n?([\s\S]*?)```/g;
-  let lastIndex = 0;
-  let match: RegExpExecArray | null;
-
-  while ((match = codeBlockRegex.exec(text)) !== null) {
-    const before = text.slice(lastIndex, match.index);
-    parts.push({ type: 'text', content: before });
-    parts.push({ type: 'code', content: match[1], index: codeBlockIndex++ });
-    lastIndex = match.index + match[0].length;
-  }
-  parts.push({ type: 'text', content: text.slice(lastIndex) });
-
-  return parts.map((part) => {
-    if (part.type === 'code') {
-      const escaped = escapeHtml(part.content.trimEnd());
-      const encoded = encodeURIComponent(part.content.trimEnd());
-      return `<div class="code-block-wrap">
-  <button class="copy-btn" onclick="copyCode(this, '${encoded}')" title="Copy code">
-    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-      <rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
-    </svg>
-    Copy
-  </button>
-  <pre><code>${escaped}</code></pre>
-</div>`;
-    } else {
-      const escaped = escapeHtml(part.content);
-      return escaped
-        .replace(/`([^`]+)`/g, `<code class="inline">$1</code>`)
-        .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
-        .replace(/\n/g, "<br>");
-    }
-  }).join('').trim();
+function escapeHtml(value: unknown): string {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
-function getWebviewContent(data: PanelData): string {
-  const isChroma  = data.source === "ChromaDB";
-  const isRuntime = data.errorType === "runtime";
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null &&
+    typeof value === 'object' &&
+    !Array.isArray(value);
+}
 
-  // ── Badge tooltips ──────────────────────────────────────────
-  const errorTypeTooltip = isRuntime
-    ? "Runtime Error: occurs while the program is running — e.g. null pointer, division by zero, stack overflow."
-    : "Diagnostic Error: caught by the language server before your code runs — e.g. syntax error or type mismatch.";
-  const sourceTooltip = isChroma
-    ? "ChromaDB: retrieved from the local error knowledge base using vector similarity search."
-    : "AI Generated: Groq AI (LLaMA) generated this explanation from your code.";
+function isValidPanelErrorType(
+  value: unknown
+): value is PanelErrorType | undefined {
+  return (
+    value === undefined ||
+    value === 'diagnostic' ||
+    value === 'runtime' ||
+    value === 'potential'
+  );
+}
 
-  const errorTypeBadge = isRuntime
-    ? `<span class="badge badge-runtime"  data-tooltip="${errorTypeTooltip}">⚡ Runtime Error</span>`
-    : `<span class="badge badge-diagnostic" data-tooltip="${errorTypeTooltip}">🔍 Diagnostic Error</span>`;
-  const sourceBadge = isChroma
-    ? `<span class="badge badge-chroma" data-tooltip="${sourceTooltip}">📚 ChromaDB</span>`
-    : `<span class="badge badge-ai"     data-tooltip="${sourceTooltip}">🤖 AI Generated</span>`;
+function isValidLineNumber(
+  value: unknown
+): value is number | undefined {
+  return value === undefined ||
+    (
+      typeof value === 'number' &&
+      Number.isFinite(value) &&
+      Number.isInteger(value) &&
+      value >= 0
+    );
+}
 
-  // ── Location chip (filename + line) ─────────────────────────
-  const locationHtml = (data.fileName || data.lineNumber !== undefined)
-    ? `<div class="location-chip">
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/>
-        </svg>
-        <span class="location-file">${escapeHtml(data.fileName ?? 'Unknown file')}</span>
-        ${data.lineNumber !== undefined && data.lineNumber > 0
-          ? `<span class="location-sep">·</span><span class="location-line">Line ${data.lineNumber + 1}</span>`
-          : ''}
-        ${data.targetLanguage
-          ? `<span class="location-sep">·</span>
-             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-               <circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/>
-               <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
-             </svg>
-             <span class="location-lang">${escapeHtml(data.targetLanguage)}</span>`
-          : ''}
-       </div>`
-    : '';
+function isValidPanelError(value: unknown): value is PanelError {
+  return isRecord(value) &&
+    typeof value.errorMessage === 'string' &&
+    (value.id === undefined || typeof value.id === 'string') &&
+    (value.fileName === undefined || typeof value.fileName === 'string') &&
+    isValidLineNumber(value.lineNumber) &&
+    isValidPanelErrorType(value.errorType);
+}
 
-  // ── Matched error bar ────────────────────────────────────────
-  const matchedHtml = isChroma && data.matchedError
-    ? `<div class="matched-bar">
-        <span class="matched-dot"></span>
-        <span class="matched-label">Matched:</span>
-        <code class="matched-value">${escapeHtml(data.matchedError)}</code>
-       </div>`
-    : "";
+function isValidPanelExplanation(
+  value: unknown
+): value is PanelExplanation {
+  return isRecord(value) &&
+    isValidPanelError(value) &&
+    typeof value.id === 'string' &&
+    value.id.trim().length > 0 &&
+    typeof value.explanation === 'string' &&
+    (value.source === undefined || typeof value.source === 'string') &&
+    (value.matchedError === undefined ||
+      typeof value.matchedError === 'string') &&
+    (value.distance === undefined ||
+      value.distance === null ||
+      (typeof value.distance === 'number' &&
+        Number.isFinite(value.distance))) &&
+    (value.failureMessage === undefined ||
+      typeof value.failureMessage === 'string');
+}
 
-  // ── Remember section ─────────────────────────────────────────
-  const rememberHtml = data.remember
-    ? `<div class="section">
-        <div class="section-label amber-label">
-          <span class="label-icon">💡</span>
-          <span>Remember for Next Time</span>
-        </div>
-        <div class="card card-remember">${renderMarkdown(data.remember)}</div>
-       </div>`
-    : "";
+function isValidPanelData(value: unknown): value is PanelData {
+  return isRecord(value) &&
+    typeof value.targetLanguage === 'string' &&
+    SUPPORTED_LANGUAGES.includes(value.targetLanguage) &&
+    typeof value.sourceLanguage === 'string' &&
+    Array.isArray(value.explanations) &&
+    value.explanations.every(isValidPanelExplanation) &&
+    typeof value.fix === 'string' &&
+    typeof value.remember === 'string' &&
+    (value.source === undefined || typeof value.source === 'string') &&
+    (value.fileName === undefined || typeof value.fileName === 'string') &&
+    (value.errors === undefined ||
+      (Array.isArray(value.errors) &&
+        value.errors.every(isValidPanelError)));
+}
 
-  const fixHtml = renderMarkdown(data.fix);
+function getInvalidPanelHtml(
+  webview: vscode.Webview,
+  extensionUri: vscode.Uri,
+  nonce: string
+): string {
+  const logo = webview.asWebviewUri(
+    vscode.Uri.joinPath(
+      extensionUri,
+      'media',
+      'code-equalize-logo.png'
+    )
+  );
 
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<style>
-  :root {
-    --bg:           var(--vscode-editor-background);
-    --fg:           var(--vscode-editor-foreground);
-    --fg-muted:     var(--vscode-descriptionForeground, #8b949e);
-    --border:       var(--vscode-panel-border, rgba(128,128,128,.18));
-    --surface:      var(--vscode-editorWidget-background, rgba(128,128,128,.06));
-    --code-bg:      var(--vscode-textCodeBlock-background, rgba(0,0,0,.22));
-    --blue:         #4FC1FF;
-    --blue-dim:     rgba(79,193,255,.10);
-    --blue-border:  rgba(79,193,255,.28);
-    --blue-label:   rgba(79,193,255,.15);
-    --green:        #4EC994;
-    --green-dim:    rgba(78,201,148,.10);
-    --green-border: rgba(78,201,148,.28);
-    --green-label:  rgba(78,201,148,.15);
-    --amber:        #E5A11C;
-    --amber-dim:    rgba(229,161,28,.10);
-    --amber-border: rgba(229,161,28,.28);
-    --amber-label:  rgba(229,161,28,.15);
-    --purple:       #C586C0;
-    --purple-dim:   rgba(197,134,192,.10);
-    --purple-border:rgba(197,134,192,.28);
-    --radius: 9px;
-    --font-ui:   var(--vscode-font-family, -apple-system, "Segoe UI", sans-serif);
-    --font-mono: var(--vscode-editor-font-family, "Cascadia Code", Consolas, monospace);
-  }
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body {
-    font-family: var(--font-ui); font-size: 13.5px;
-    background: var(--bg); color: var(--fg);
-    line-height: 1.75; padding-bottom: 48px;
-  }
+<meta
+  http-equiv="Content-Security-Policy"
+  content="
+    default-src 'none';
+    img-src ${webview.cspSource} data:;
+    style-src 'nonce-${nonce}';
+    script-src 'nonce-${nonce}';
+  "
+>
+<title>Code Equalize</title>
+<style nonce="${nonce}">
+body {
+  margin: 0;
+  padding: 22px 24px;
+  background: var(--vscode-editor-background);
+  color: var(--vscode-foreground);
+  font-family: var(--vscode-font-family);
+  font-size: 13px;
+}
 
-  /* ── Header ── */
-  .header {
-    padding: 16px 20px 14px;
-    border-bottom: 1px solid var(--border);
-    background: linear-gradient(135deg, rgba(79,193,255,.06) 0%, rgba(78,201,148,.04) 60%, transparent 100%);
-  }
-  .header-top {
-    display: flex; align-items: center; justify-content: space-between;
-    gap: 10px; flex-wrap: wrap; margin-bottom: 10px;
-  }
-  .header-title {
-    display: flex; align-items: center; gap: 10px;
-    font-size: 15px; font-weight: 700; letter-spacing: -.025em;
-  }
-  .logo-icon {
-    width: 30px; height: 30px; border-radius: 7px;
-    background: linear-gradient(135deg, var(--blue-dim), var(--green-dim));
-    border: 1px solid var(--blue-border);
-    display: flex; align-items: center; justify-content: center;
-    font-size: 15px; flex-shrink: 0;
-  }
-  .header-badges { display: flex; gap: 6px; flex-wrap: wrap; }
-  .header-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+main {
+  max-width: 700px;
+  margin: 0 auto;
+  padding: 18px;
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 8px;
+  background: var(--vscode-sideBar-background);
+}
 
-  /* ── Location chip ── */
-  .location-chip {
-    display: inline-flex; align-items: center; gap: 5px;
-    padding: 4px 10px; border-radius: 6px;
-    background: var(--surface); border: 1px solid var(--border);
-    font-size: 11.5px; color: var(--fg-muted);
-    font-family: var(--font-mono);
-  }
-  .location-file { color: var(--fg); font-weight: 600; }
-  .location-line { color: var(--blue); font-weight: 600; }
-  .location-lang { color: var(--purple); font-weight: 600; font-family: var(--font-ui); }
-  .location-sep  { color: var(--fg-muted); opacity: .5; }
+header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+}
 
-  /* ── Badges ── */
-  .badge {
-    position: relative; display: inline-flex; align-items: center; gap: 5px;
-    padding: 3px 10px; border-radius: 99px;
-    font-size: 11px; font-weight: 600; letter-spacing: .03em;
-    border: 1px solid transparent; cursor: default;
-    transition: filter .15s, transform .15s; user-select: none;
-  }
-  .badge:hover { filter: brightness(1.15); transform: translateY(-1px); }
-  .badge-runtime    { color: var(--amber);  background: var(--amber-dim);  border-color: var(--amber-border); }
-  .badge-diagnostic { color: var(--blue);   background: var(--blue-dim);   border-color: var(--blue-border); }
-  .badge-chroma     { color: var(--green);  background: var(--green-dim);  border-color: var(--green-border); }
-  .badge-ai         { color: var(--purple); background: var(--purple-dim); border-color: var(--purple-border); }
-  .badge::after {
-    content: attr(data-tooltip);
-    position: absolute; top: calc(100% + 7px); right: 0; width: 230px;
-    background: var(--vscode-editorHoverWidget-background, #1e1e2e);
-    color: var(--fg); border: 1px solid var(--border);
-    border-radius: 7px; padding: 9px 12px;
-    font-size: 11.5px; font-weight: 400; line-height: 1.55; letter-spacing: 0;
-    white-space: normal; z-index: 99; opacity: 0; pointer-events: none;
-    transform: translateY(4px); transition: opacity .18s, transform .18s;
-    box-shadow: 0 4px 18px rgba(0,0,0,.35);
-  }
-  .badge:hover::after { opacity: 1; transform: translateY(0); }
-
-  /* ── Matched bar ── */
-  .matched-bar {
-    display: flex; align-items: center; gap: 8px;
-    padding: 7px 12px; border-radius: 7px; margin-top: 8px;
-    background: var(--green-dim); border: 1px solid var(--green-border); font-size: 12px;
-  }
-  .matched-dot {
-    width: 6px; height: 6px; border-radius: 50%;
-    background: var(--green); box-shadow: 0 0 5px var(--green); flex-shrink: 0;
-  }
-  .matched-label { color: var(--fg-muted); font-weight: 600; flex-shrink: 0; }
-  .matched-value { font-family: var(--font-mono); font-size: 11.5px; color: var(--green); background: none; border: none; padding: 0; }
-
-  /* ── Body ── */
-  .body { padding: 18px 20px 0; display: flex; flex-direction: column; gap: 18px; }
-
-  /* ── Section label pills ── */
-  .section-label {
-    display: flex; align-items: center; gap: 7px; margin-bottom: 8px;
-    font-size: 10px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase;
-    padding: 4px 10px; border-radius: 6px; width: fit-content;
-    color: var(--fg-muted); background: var(--surface); border: 1px solid var(--border);
-  }
-  .blue-label  { color: var(--blue);  background: var(--blue-label);  border-color: var(--blue-border); }
-  .green-label { color: var(--green); background: var(--green-label); border-color: var(--green-border); }
-  .amber-label { color: var(--amber); background: var(--amber-label); border-color: var(--amber-border); }
-  .label-icon { font-size: 12px; }
-
-  /* ── Cards ── */
-  .card {
-    background: var(--surface); border: 1px solid var(--border);
-    border-radius: var(--radius); padding: 14px 17px;
-    font-size: 13.5px; line-height: 1.8;
-  }
-  .card-explanation { border-left: 3px solid var(--blue);  background: var(--blue-dim);  border-color: var(--blue-border); }
-  .card-fix         { border-left: 3px solid var(--green); background: var(--green-dim); border-color: var(--green-border); }
-  .card-remember    { border-left: 3px solid var(--amber); background: var(--amber-dim); border-color: var(--amber-border); }
-
-  /* ── Code blocks ── */
-  .code-block-wrap { position: relative; margin: 12px 0 4px; }
-  .code-block-wrap pre {
-    margin: 0; background: var(--code-bg); border: 1px solid var(--border);
-    border-radius: var(--radius); padding: 36px 14px 13px;
-    overflow-x: auto; font-size: 12.5px; line-height: 1.6;
-  }
-  .copy-btn {
-    position: absolute; top: 7px; right: 7px;
-    display: inline-flex; align-items: center; gap: 5px;
-    padding: 3px 9px; background: var(--surface);
-    border: 1px solid var(--border); border-radius: 5px;
-    color: var(--fg-muted); font-family: var(--font-ui);
-    font-size: 11px; font-weight: 600; cursor: pointer;
-    transition: background .15s, color .15s, border-color .15s; z-index: 2;
-  }
-  .copy-btn:hover   { background: var(--green-dim); color: var(--green); border-color: var(--green-border); }
-  .copy-btn.copied  { background: var(--green-dim); color: var(--green); border-color: var(--green-border); }
-  code { font-family: var(--font-mono); font-size: 12.5px; }
-  code.inline {
-    background: rgba(128,128,128,.13); padding: 2px 5px;
-    border-radius: 4px; font-size: 12px; border: 1px solid var(--border);
-  }
-  pre code { background: none; border: none; padding: 0; }
-
-  /* ── Fix locked ── */
-  .fix-locked {
-    border-radius: var(--radius); border: 1px dashed var(--border);
-    background: var(--surface); padding: 24px 20px 20px; text-align: center;
-  }
-  .countdown-ring { position: relative; width: 70px; height: 70px; margin: 0 auto 13px; }
-  .countdown-ring svg { transform: rotate(-90deg); }
-  .countdown-ring .track    { fill: none; stroke: var(--border); stroke-width: 4; }
-  .countdown-ring .progress {
-    fill: none; stroke: var(--green); stroke-width: 4;
-    stroke-linecap: round; stroke-dasharray: 188.5; stroke-dashoffset: 0;
-    transition: stroke-dashoffset 1s linear, stroke .4s;
-  }
-  .countdown-number {
-    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
-    font-size: 20px; font-weight: 700; color: var(--green);
-    font-variant-numeric: tabular-nums; transition: color .4s;
-  }
-  .fix-locked-title { font-size: 13px; font-weight: 600; margin-bottom: 4px; }
-  .fix-locked-sub   { font-size: 11.5px; color: var(--fg-muted); line-height: 1.6; max-width: 260px; margin: 0 auto; }
-  .fix-progress-bar { height: 2px; border-radius: 99px; background: var(--border); margin-top: 14px; overflow: hidden; }
-  .fix-progress-fill {
-    height: 100%; width: 100%;
-    background: linear-gradient(90deg, var(--blue), var(--green));
-    border-radius: 99px; transform-origin: left; transform: scaleX(1);
-    transition: transform 1s linear;
-  }
-
-  /* ── Toggle button ── */
-  .fix-toggle-btn {
-    display: none; width: 100%; align-items: center; justify-content: space-between;
-    padding: 11px 17px; border-radius: var(--radius);
-    border: 1px solid var(--green-border); background: var(--green-dim);
-    color: var(--green); font-family: var(--font-ui);
-    font-size: 13px; font-weight: 600; cursor: pointer;
-    transition: background .2s, box-shadow .2s; letter-spacing: .01em;
-  }
-  .fix-toggle-btn:hover { background: rgba(78,201,148,.2); box-shadow: 0 0 12px rgba(78,201,148,.18); }
-  .fix-toggle-btn.visible { display: flex; }
-  .fix-toggle-left { display: flex; align-items: center; gap: 8px; }
-  .fix-toggle-chevron { display: inline-flex; transition: transform .3s ease; flex-shrink: 0; }
-  .fix-toggle-chevron.open { transform: rotate(180deg); }
-
-  /* ── Collapsible ── */
-  .fix-collapse { display: grid; grid-template-rows: 0fr; transition: grid-template-rows .3s ease; margin-top: 8px; }
-  .fix-collapse.open { grid-template-rows: 1fr; }
-  .fix-collapse-inner { overflow: hidden; }
-
-  /* ── Footer ── */
-  .footer {
-    margin-top: 26px; padding: 12px 20px 0; border-top: 1px solid var(--border);
-    display: flex; align-items: center; justify-content: center;
-    gap: 8px; font-size: 11px; color: var(--fg-muted); opacity: .45; letter-spacing: .05em;
-  }
+img {
+  width: 40px;
+  height: 40px;
+  object-fit: contain;
+}
 </style>
 </head>
 <body>
+<main>
+  <header>
+    <img src="${logo}" alt="Code Equalize logo">
+    <h1>Code Equalize</h1>
+  </header>
+  <p role="alert">Unable to display this panel because its data is invalid.</p>
+</main>
+</body>
+</html>`;
+}
 
-<div class="header">
-  <div class="header-top">
-    <div class="header-title">
-      <div class="logo-icon">⚖️</div>
-      Code Equalize
-    </div>
-    <div class="header-badges">
-      ${errorTypeBadge}
-      ${sourceBadge}
-    </div>
-  </div>
-  <div class="header-meta">
-    ${locationHtml}
-  </div>
-  ${matchedHtml}
-</div>
+function renderMarkdownHtml(value: unknown): string {
+  const escaped = escapeHtml(value);
+  const fence = String.fromCharCode(96).repeat(3);
+  const blocks = escaped.split(fence);
 
-<div class="body">
+  return blocks.map((block, index) => {
+    // Fenced code blocks
+    if (index % 2 === 1) {
+      const hasInfoString = !/^\r?\n/.test(block);
+      const lines = block
+        .replace(/^\r?\n|\r?\n$/g, '')
+        .split(/\r?\n/);
+      const infoString = hasInfoString
+        ? lines[0]?.trim() || ''
+        : '';
+      const infoMatch = infoString.match(
+        /^(?:\{\.([^\s}]+)(?:\s[^}]*)?\}|([^\s]+))/
+      );
+      const language = (infoMatch?.[1] || infoMatch?.[2] || '')
+        .replace(/^(?:language|lang)-/i, '')
+        .replace(/^\./, '')
+        .toLowerCase();
 
-  <!-- Why This Happened -->
-  <div class="section">
-    <div class="section-label blue-label">
-      <span class="label-icon">🤔</span>
-      <span>Why This Happened</span>
-    </div>
-    <div class="card card-explanation">${renderMarkdown(data.explanation)}</div>
-  </div>
+      const supportedCodeLanguages = new Set([
+        'python', 'py',
+        'javascript', 'js',
+        'typescript', 'ts',
+        'java',
+        'c', 'cpp', 'c++',
+        'csharp', 'cs',
+        'html', 'css',
+        'json',
+        'bash', 'shell',
+        'sql',
+        'text', 'plaintext'
+      ]);
 
-  <!-- How to Fix It -->
-  <div class="section">
-    <div class="section-label green-label">
-      <span class="label-icon">🛠️</span>
-      <span>How to Fix It</span>
-    </div>
+      const hasLanguage = supportedCodeLanguages.has(language);
+      const code = (hasLanguage ? lines.slice(1) : lines).join('\n');
 
-    <div class="fix-locked" id="fixLocked">
-      <div class="countdown-ring">
-        <svg width="70" height="70" viewBox="0 0 70 70">
-          <circle class="track"    cx="35" cy="35" r="30"/>
-          <circle class="progress" id="progressCircle" cx="35" cy="35" r="30"/>
-        </svg>
-        <div class="countdown-number" id="countdownNum">15</div>
-      </div>
-      <div class="fix-locked-title">Code Fix is locked 🔒</div>
-      <div class="fix-locked-sub">Read the explanation above first.<br>The fix unlocks in a moment.</div>
-      <div class="fix-progress-bar"><div class="fix-progress-fill" id="progressBar"></div></div>
-    </div>
-
-    <button class="fix-toggle-btn" id="toggleBtn" onclick="toggleFix()">
-      <span class="fix-toggle-left">
-        <span id="toggleLabel">✅ Show Code Fix</span>
-      </span>
-      <span class="fix-toggle-chevron" id="toggleChevron">
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-          <polyline points="6 9 12 15 18 9"/>
-        </svg>
-      </span>
-    </button>
-
-    <div class="fix-collapse" id="fixCollapse">
-      <div class="fix-collapse-inner">
-        <div class="card card-fix">${fixHtml}</div>
-      </div>
-    </div>
-  </div>
-
-  ${rememberHtml}
-
-</div>
-
-<div class="footer">⚖️ &nbsp;The compiler complained. We explained.</div>
-
-<script>
-  const TOTAL = 15;
-  let remaining = TOTAL;
-  const circle    = document.getElementById('progressCircle');
-  const numEl     = document.getElementById('countdownNum');
-  const barEl     = document.getElementById('progressBar');
-  const lockedEl  = document.getElementById('fixLocked');
-  const toggleBtn = document.getElementById('toggleBtn');
-  const CIRCUMFERENCE = 2 * Math.PI * 30;
-  circle.style.strokeDashoffset = '0';
-
-  const timer = setInterval(() => {
-    remaining--;
-    const frac = remaining / TOTAL;
-    circle.style.strokeDashoffset = CIRCUMFERENCE * (1 - frac);
-    numEl.textContent = remaining;
-    if (remaining <= 5) {
-      circle.style.stroke = 'var(--amber)';
-      numEl.style.color   = 'var(--amber)';
+      return `<pre class="markdown-code"><code>${code}</code></pre>`;
     }
-    barEl.style.transform = 'scaleX(' + frac + ')';
-    if (remaining <= 0) {
-      clearInterval(timer);
-      lockedEl.style.display = 'none';
-      toggleBtn.classList.add('visible');
+
+    const inlineCode: string[] = [];
+    let placeholderPrefix = '\u0000CE_INLINE_CODE_';
+
+    while (block.includes(placeholderPrefix)) {
+      placeholderPrefix += '_';
+    }
+
+    const renderInline = (value: string): string => {
+      let html = value.replace(/`([^`\n]+)`/g, (_, code) => {
+        const placeholder =
+          `${placeholderPrefix}${inlineCode.length}\u0000`;
+        inlineCode.push(
+          `<code class="markdown-inline-code">${code}</code>`
+        );
+        return placeholder;
+      });
+
+      html = html
+        .replace(
+          /(^|[^\w*])\*\*(\S(?:.*?\S)?)\*\*(?![\w*])/g,
+          '$1<strong>$2</strong>'
+        )
+        .replace(
+          /(^|[\W])__(\S(?:.*?\S)?)__(?![\w_])/g,
+          '$1<strong>$2</strong>'
+        )
+        .replace(
+          /(^|[^\w*])\*(\S(?:[^*\n]*?\S)?)\*(?![\w*])/g,
+          '$1<em>$2</em>'
+        )
+        .replace(
+          /(^|[\W])_(\S(?:[^_\n]*?\S)?)_(?![\w_])/g,
+          '$1<em>$2</em>'
+        );
+
+      inlineCode.forEach((code, codeIndex) => {
+        html = html.replace(
+          `${placeholderPrefix}${codeIndex}\u0000`,
+          code
+        );
+      });
+
+      return html;
+    };
+
+    const lines = block.split(/\r?\n/);
+    const renderedBlocks: string[] = [];
+    let paragraphLines: string[] = [];
+    let listTag: 'ul' | 'ol' | undefined;
+    let listItems: string[] = [];
+
+    const flushParagraph = (): void => {
+      if (paragraphLines.length === 0) {
+        return;
+      }
+
+      renderedBlocks.push(
+        `<p>${renderInline(paragraphLines.join('\n')).replace(/\n/g, '<br>')}</p>`
+      );
+      paragraphLines = [];
+    };
+
+    const flushList = (): void => {
+      if (!listTag || listItems.length === 0) {
+        return;
+      }
+
+      renderedBlocks.push(
+        `<${listTag}>${listItems.map(item => `<li>${renderInline(item)}</li>`).join('')}</${listTag}>`
+      );
+      listTag = undefined;
+      listItems = [];
+    };
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+
+      if (!trimmed) {
+        flushParagraph();
+        flushList();
+        continue;
+      }
+
+      const heading = trimmed.match(
+        /^(#{1,3})\s+(.+?)(?:\s+#+\s*)?$/
+      );
+
+      if (heading) {
+        flushParagraph();
+        flushList();
+
+        const level = heading[1].length + 1;
+        renderedBlocks.push(
+          `<h${level}>${renderInline(heading[2])}</h${level}>`
+        );
+        continue;
+      }
+
+      const bullet = trimmed.match(/^[-*]\s+(.+)$/);
+      const numbered = trimmed.match(/^\d+[.)]\s+(.+)$/);
+      const item = bullet || numbered;
+
+      if (item) {
+        flushParagraph();
+
+        const nextListTag = bullet ? 'ul' : 'ol';
+
+        if (listTag && listTag !== nextListTag) {
+          flushList();
+        }
+
+        listTag = nextListTag;
+        listItems.push(item[1]);
+        continue;
+      }
+
+      flushList();
+      paragraphLines.push(trimmed);
+    }
+
+    flushParagraph();
+    flushList();
+
+    return renderedBlocks.join('');
+  }).join('');
+}
+
+
+/**
+ * Generates a secure nonce for the webview CSP.
+ */
+function getNonce(): string {
+  const chars =
+    'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+
+  return Array.from(
+    { length: 32 },
+    () => chars[Math.floor(Math.random() * chars.length)]
+  ).join('');
+}
+
+/**
+ * Sorts errors by their original zero-based source line.
+ * Errors without a line number appear last.
+ */
+function sortByLine<T extends PanelError>(items: T[]): T[] {
+  return [...items].sort((a, b) => {
+    const lineA =
+      typeof a.lineNumber === 'number' &&
+      isValidLineNumber(a.lineNumber)
+        ? a.lineNumber
+        : Number.MAX_SAFE_INTEGER;
+
+    const lineB =
+      typeof b.lineNumber === 'number' &&
+      isValidLineNumber(b.lineNumber)
+        ? b.lineNumber
+        : Number.MAX_SAFE_INTEGER;
+
+    return lineA - lineB;
+  });
+}
+
+/**
+ * Returns the complete detected-error list.
+ */
+function getErrors(data: PanelData): PanelError[] {
+  if (data.errors?.length) {
+    return sortByLine(data.errors);
+  }
+
+  return sortByLine(data.explanations);
+}
+
+function getErrorTypeLabel(type?: string): string {
+  switch (type) {
+    case 'runtime':
+      return 'Runtime Error';
+
+    case 'potential':
+      return 'Potential Issue';
+
+    default:
+      return 'Diagnostic Error';
+  }
+}
+
+function getErrorTypeTooltip(type?: string): string {
+  switch (type) {
+    case 'runtime':
+      return 'Runtime Error: An error reported by the debugger while the program was executing.';
+
+    case 'potential':
+      return 'Potential Issue: A high-confidence static concern that may cause a runtime problem.';
+
+    default:
+      return 'Diagnostic Error: An issue reported by a language analyzer, compiler, or editor diagnostic provider.';
+  }
+}
+
+function getCombinedErrorType(errors: PanelError[]): string {
+  const types = new Set(
+    errors.map(error => error.errorType || 'diagnostic')
+  );
+
+  const labels: string[] = [];
+
+  if (types.has('runtime')) {
+    labels.push('Runtime');
+  }
+
+  if (types.has('diagnostic')) {
+    labels.push('Diagnostic');
+  }
+
+  if (types.has('potential')) {
+    labels.push('Potential');
+  }
+
+  if (labels.length === 0) {
+    return 'Diagnostic Error';
+  }
+
+  if (labels.length === 1) {
+    return labels[0] === 'Potential'
+      ? 'Potential Issue'
+      : `${labels[0]} Error`;
+  }
+
+  return `${labels.join(' & ')} Errors`;
+}
+
+function getCombinedErrorTooltip(errors: PanelError[]): string {
+  const types = new Set(
+    errors.map(error => error.errorType || 'diagnostic')
+  );
+
+  const descriptions: string[] = [];
+
+  if (types.has('runtime')) {
+    descriptions.push(getErrorTypeTooltip('runtime'));
+  }
+
+  if (types.has('diagnostic')) {
+    descriptions.push(getErrorTypeTooltip('diagnostic'));
+  }
+
+  if (types.has('potential')) {
+    descriptions.push(getErrorTypeTooltip('potential'));
+  }
+
+  return descriptions.join('\n\n');
+}
+
+
+function getSourceTooltip(source?: string): string {
+  const normalizedSource = source?.toLowerCase();
+
+  if (normalizedSource === 'mixed') {
+    return (
+      'Mixed: Some errors had accepted matching examples from ChromaDB, ' +
+      'while others required AI generation. Groq generated the current ' +
+      'explanations and consolidated fix.'
+    );
+  }
+
+  if (normalizedSource === 'chromadb') {
+    return (
+      'ChromaDB: Similar programming-error examples were retrieved ' +
+      'from the knowledge base as supporting context. Groq generated ' +
+      'the current explanations and consolidated fix.'
+    );
+  }
+
+  if (normalizedSource === 'ai') {
+    return (
+      'AI: Groq generated this response without accepted matching ' +
+      'examples from the ChromaDB knowledge base.'
+    );
+  }
+
+  return 'Explanation source information is unavailable.';
+}
+
+
+/**
+ * Renders the detected-error table.
+ */
+function renderErrorRows(data: PanelData): string {
+  return getErrors(data).map((error, index) => `
+    <tr class="error-row">
+      <td class="index-cell">${index + 1}</td>
+
+      <td class="line-cell">
+        ${
+          typeof error.lineNumber === 'number' &&
+          isValidLineNumber(error.lineNumber)
+            ? error.lineNumber + 1
+            : '—'
+        }
+      </td>
+
+      <td>
+        <span
+          class="error-badge"
+          title="${escapeHtml(
+            getErrorTypeTooltip(error.errorType)
+          )}"
+        >
+          ${escapeHtml(getErrorTypeLabel(error.errorType))}
+        </span>
+      </td>
+
+      <td class="error-message">
+        ${escapeHtml(error.errorMessage)}
+      </td>
+
+      <td class="file-cell">
+        ${escapeHtml(
+          error.fileName || data.fileName || '—'
+        )}
+      </td>
+    </tr>
+  `).join('');
+}
+
+/**
+ * Renders each error explanation separately.
+ */
+function renderExplanationCards(data: PanelData): string {
+  const ordered = [...data.explanations].sort((a, b) => {
+    const lineA =
+      typeof a.lineNumber === 'number' &&
+      isValidLineNumber(a.lineNumber)
+        ? a.lineNumber
+        : Number.MAX_SAFE_INTEGER;
+    const lineB =
+      typeof b.lineNumber === 'number' &&
+      isValidLineNumber(b.lineNumber)
+        ? b.lineNumber
+        : Number.MAX_SAFE_INTEGER;
+
+    return lineA - lineB;
+  });
+
+  return ordered.map((item, index) => `
+    <article
+      class="explanation-card-block"
+      data-explanation-id="${escapeHtml(item.id)}"
+    >
+      <div class="explanation-card-header">
+
+        <div class="explanation-card-title">
+
+          <span class="explanation-index">
+            Error ${index + 1}
+          </span>
+
+          <span
+            class="error-badge"
+            title="${escapeHtml(
+              getErrorTypeTooltip(item.errorType)
+            )}"
+          >
+            ${escapeHtml(
+              getErrorTypeLabel(item.errorType)
+            )}
+          </span>
+
+          <span class="explanation-line">
+            Line ${
+              typeof item.lineNumber === 'number' &&
+              isValidLineNumber(item.lineNumber)
+                ? item.lineNumber + 1
+                : '—'
+            }
+          </span>
+
+          ${
+            item.source
+              ? `<span class="individual-source">
+                  ${escapeHtml(item.source)}
+                </span>`
+              : ''
+          }
+
+        </div>
+
+        <div class="matched-error">
+          ${escapeHtml(
+            item.matchedError || item.errorMessage
+          )}
+        </div>
+
+      </div>
+
+      <div class="content-card explanation-card">
+  <div class="explanation-text">
+    ${renderMarkdownHtml(
+      item.failureMessage
+        ? `Explanation unavailable: ${item.failureMessage}`
+        : item.explanation
+    )}
+  </div>
+</div>
+
+    </article>
+  `).join('');
+}
+
+/**
+ * Builds the complete VS Code webview HTML.
+ */
+function getHtml(
+  webview: vscode.Webview,
+  extensionUri: vscode.Uri,
+  data: PanelData,
+  nonce: string
+): string {
+  if (!isValidPanelData(data)) {
+    return getInvalidPanelHtml(webview, extensionUri, nonce);
+  }
+
+  const logo = webview.asWebviewUri(
+    vscode.Uri.joinPath(
+      extensionUri,
+      'media',
+      'code-equalize-logo.png'
+    )
+  );
+
+  const loader = webview.asWebviewUri(
+    vscode.Uri.joinPath(
+      extensionUri,
+      'media',
+      'code-equalize-loader.png'
+    )
+  );
+
+  const languageOptions = SUPPORTED_LANGUAGES.map(language => `
+    <option
+      value="${escapeHtml(language)}"
+      ${language === data.targetLanguage ? 'selected' : ''}
+    >
+      ${escapeHtml(language)}
+    </option>
+  `).join('');
+
+  const detectedErrors = getErrors(data);
+  const errors = renderErrorRows(data);
+  const explanationCards = renderExplanationCards(data);
+
+  const errorCount = detectedErrors.length;
+
+  const sourceLabel =
+  data.source?.toLowerCase() === 'mixed'
+    ? 'Mixed'
+    : data.source?.toLowerCase() === 'chromadb'
+      ? 'ChromaDB'
+      : data.source || 'Backend';
+
+  const combinedErrorType =
+    getCombinedErrorType(detectedErrors);
+
+  const combinedErrorTooltip =
+    getCombinedErrorTooltip(detectedErrors);
+
+  const sourceTooltip =
+    getSourceTooltip(data.source);
+
+  const cspSource = webview.cspSource;
+
+  return `<!DOCTYPE html>
+<html lang="en">
+
+<head>
+<meta charset="UTF-8">
+
+<meta
+  name="viewport"
+  content="width=device-width, initial-scale=1.0"
+>
+
+<meta
+  http-equiv="Content-Security-Policy"
+  content="
+    default-src 'none';
+    img-src ${cspSource} data:;
+    style-src 'nonce-${nonce}';
+    script-src 'nonce-${nonce}';
+  "
+>
+
+<title>Code Equalize</title>
+
+<style nonce="${nonce}">
+
+:root {
+  color-scheme: dark;
+
+  --background: var(--vscode-editor-background);
+  --surface: var(--vscode-sideBar-background);
+  --surface-alt: var(--vscode-editorWidget-background);
+  --border: var(--vscode-panel-border);
+  --text: var(--vscode-foreground);
+  --muted: var(--vscode-descriptionForeground);
+
+  --blue: #89b4fa;
+  --green: #a6e3a1;
+  --orange: #fab387;
+  --red: #f38ba8;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+body {
+  margin: 0;
+  padding: 22px 24px;
+
+  background: var(--background);
+  color: var(--text);
+
+  font-family: var(--vscode-font-family);
+  font-size: 13px;
+  line-height: 1.65;
+}
+
+.container {
+  width: 100%;
+  max-width: 1050px;
+  margin: 0 auto;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+
+  padding-bottom: 17px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 17px;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  min-width: 0;
+}
+
+.logo {
+  width: 43px;
+  height: 43px;
+  object-fit: contain;
+  flex-shrink: 0;
+}
+
+.brand-name {
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: 0.2px;
+  line-height: 1.4;
+}
+
+.brand-subtitle {
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.15px;
+  line-height: 1.5;
+}
+
+.status-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+
+  padding: 6px 11px;
+
+  border: 1px solid var(--border);
+  border-radius: 7px;
+
+  background: var(--surface);
+  color: var(--muted);
+
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: help;
+}
+
+.status-indicator {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--blue);
+}
+
+.status-indicator.green {
+  background: var(--green);
+}
+
+.toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+
+.file-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+
+  padding: 7px 11px;
+
+  border-radius: 5px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+
+  font-size: 12px;
+}
+
+.file-name {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.language-area {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.language-label {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+select {
+  min-width: 125px;
+  padding: 8px 10px;
+
+  border: 1px solid var(--vscode-dropdown-border);
+  border-radius: 5px;
+
+  background: var(--vscode-dropdown-background);
+  color: var(--vscode-dropdown-foreground);
+
+  font: inherit;
+  font-size: 12px;
+  outline: none;
+}
+
+select:focus {
+  border-color: var(--vscode-focusBorder);
+}
+
+select:focus-visible,
+.fix-toggle:focus-visible,
+.copy-button:focus-visible {
+  outline: 2px solid var(--vscode-focusBorder);
+  outline-offset: 2px;
+}
+
+select:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
+.error-panel {
+  margin-bottom: 17px;
+
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+
+  background: var(--surface);
+}
+
+.panel-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+
+  padding: 11px 13px;
+  border-bottom: 1px solid var(--border);
+
+  font-size: 12px;
+  letter-spacing: 0.2px;
+  font-weight: 600;
+}
+
+.heading-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.heading-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.red-dot {
+  background: var(--red);
+}
+
+.count-label {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 400;
+}
+
+.table-wrapper {
+  overflow-x: auto;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  text-align: left;
+  min-width: 520px;
+}
+
+thead {
+  background: var(--vscode-editor-background);
+}
+
+th {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.65px;
+}
+
+th,
+td {
+  padding: 9px 11px;
+  border-bottom: 1px solid var(--border);
+}
+
+tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.error-row {
+  cursor: default;
+}
+
+td {
+  font-size: 11px;
+}
+
+.index-cell {
+  color: var(--muted);
+  width: 38px;
+}
+
+.line-cell {
+  color: var(--orange);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.error-badge {
+  display: inline-block;
+  padding: 3px 8px;
+
+  color: var(--red);
+  background: rgba(237, 115, 125, .12);
+
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.15px;
+  white-space: nowrap;
+  cursor: help;
+}
+
+.error-message {
+  min-width: 150px;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.file-cell {
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.content-section {
+  margin-bottom: 17px;
+}
+
+.section-heading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+
+  padding: 0 0 11px;
+  margin-bottom: 10px;
+
+  border-bottom: 1px solid var(--border);
+
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.8px;
+  text-transform: uppercase;
+}
+
+.section-icon {
+  color: var(--blue);
+}
+
+.explanation-list {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.explanation-card-block {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--surface);
+}
+
+.explanation-card-header {
+  padding: 12px 15px 0;
+}
+
+.explanation-card-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.explanation-index {
+  font-weight: 700;
+  font-size: 12px;
+}
+
+.explanation-line {
+  color: var(--orange);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.individual-source {
+  color: var(--muted);
+  font-size: 10px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 6px;
+}
+
+.matched-error {
+  color: var(--muted);
+  font-size: 12px;
+  margin-bottom: 10px;
+  overflow-wrap: anywhere;
+}
+
+.content-card {
+  padding: 17px 19px;
+  border-radius: 8px;
+  font-size: 13px;
+  line-height: 1.9;
+}
+
+.explanation-card,
+.remember-card {
+  border-radius: 8px;
+}
+
+
+/* Markdown formatting inside explanations */
+
+.explanation-text h2,
+.explanation-text h3,
+.explanation-text h4 {
+  margin: 16px 0 8px;
+  color: var(--text);
+  font-weight: 700;
+  line-height: 1.5;
+}
+
+.explanation-text h2 {
+  font-size: 16px;
+}
+
+.explanation-text h3 {
+  font-size: 14px;
+}
+
+.explanation-text h4 {
+  font-size: 13px;
+}
+
+.explanation-text p {
+  margin: 0 0 12px;
+}
+
+.explanation-text p:last-child {
+  margin-bottom: 0;
+}
+
+.explanation-text ul,
+.explanation-text ol {
+  margin: 8px 0 12px;
+  padding-left: 24px;
+}
+
+.explanation-text li {
+  margin-bottom: 5px;
+  padding-left: 3px;
+}
+
+.explanation-text strong {
+  color: var(--blue);
+  font-weight: 700;
+}
+
+.explanation-text em {
+  font-style: italic;
+}
+
+.explanation-text .markdown-inline-code {
+  padding: 2px 5px;
+  border-radius: 4px;
+  background: var(--vscode-textCodeBlock-background);
+  color: var(--orange);
+  font-family: var(--vscode-editor-font-family);
+  font-size: 0.92em;
+}
+
+.explanation-text .markdown-code {
+  margin: 12px 0;
+  padding: 13px;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--vscode-editor-background);
+}
+
+.explanation-text .markdown-code code {
+  font-family: var(--vscode-editor-font-family);
+  font-size: 12px;
+  line-height: 1.8;
+  white-space: pre;
+}
+
+
+.fix-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px;
+  background: var(--surface);
+}
+
+.fix-controls {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 12px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.fix-toggle {
+  width: 100%;
+
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+
+  padding: 10px 12px;
+
+  border: 1px solid var(--border);
+  border-radius: 7px;
+
+  background: var(--surface-alt);
+  color: var(--text);
+
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.fix-toggle:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+
+.fix-content {
+  display: none;
+  margin-top: 12px;
+}
+
+.fix-content.visible {
+  display: block;
+}
+
+.fix-description {
+  color: var(--muted);
+  margin: 0 0 10px;
+}
+
+.code-block {
+  position: relative;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--vscode-editor-background);
+  overflow: hidden;
+}
+
+.code-block pre {
+  margin: 0;
+  padding: 14px;
+  overflow-x: auto;
+
+  font-family: var(--vscode-editor-font-family);
+  font-size: 12px;
+  line-height: 1.8;
+  white-space: pre;
+}
+
+.code-actions {
+  display: flex;
+  justify-content: flex-end;
+  padding: 8px 10px;
+  border-top: 1px solid var(--border);
+}
+
+.copy-button {
+  border: 1px solid var(--border);
+  border-radius: 5px;
+
+  background: var(--surface);
+  color: var(--text);
+
+  padding: 6px 10px;
+  font: inherit;
+  cursor: pointer;
+}
+
+.copy-button:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+
+.remember-card {
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.footer {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+
+  margin-top: 24px;
+  padding-top: 14px;
+
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.footer-logo {
+  width: 18px;
+  height: 18px;
+  object-fit: contain;
+}
+
+.loader-overlay {
+  position: fixed;
+  inset: 0;
+
+  display: none;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 14px;
+
+  background: color-mix(in srgb, var(--background) 82%, black);
+  z-index: 20;
+}
+
+.loader-overlay.visible {
+  display: flex;
+}
+
+.loader-image {
+  width: 54px;
+  height: 54px;
+  object-fit: contain;
+}
+
+.loader-text {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+@media (max-width: 650px) {
+  body {
+    padding: 14px;
+  }
+
+  .header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .status-group {
+    justify-content: flex-start;
+  }
+
+  .toolbar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .language-area {
+    width: 100%;
+    justify-content: space-between;
+  }
+}
+
+</style>
+</head>
+
+<body>
+
+<div class="loader-overlay" id="loader">
+  <img
+    class="loader-image"
+    src="${loader}"
+    alt="Loading"
+  >
+  <div class="loader-text" role="status" aria-live="polite">
+    Generating your explanation...
+  </div>
+</div>
+
+<div class="container">
+
+  <header class="header">
+
+    <div class="brand">
+
+      <img
+        class="logo"
+        src="${logo}"
+        alt="Code Equalize logo"
+      >
+
+      <div>
+        <div class="brand-name">
+          Code Equalize
+        </div>
+
+        <div class="brand-subtitle">
+          Understand errors. Learn better. Code confidently.
+        </div>
+      </div>
+
+    </div>
+
+    <div class="status-group">
+
+      <div
+        class="status status-error"
+        id="error-type-status"
+        title="${escapeHtml(combinedErrorTooltip)}"
+        aria-label="${escapeHtml(combinedErrorTooltip)}"
+      >
+        <span class="status-indicator"></span>
+
+        <span id="error-type-label">
+          ${escapeHtml(combinedErrorType)}
+        </span>
+      </div>
+
+      <div
+        class="status status-source"
+        id="source-status"
+        title="${escapeHtml(sourceTooltip)}"
+      >
+        <span class="status-indicator green"></span>
+
+        <span id="source-label">
+          ${escapeHtml(sourceLabel)}
+        </span>
+      </div>
+
+    </div>
+
+  </header>
+
+  <div class="toolbar">
+
+    <div class="file-info">
+
+      <span>▤</span>
+
+      <span class="file-name" id="file-name">
+        ${escapeHtml(data.fileName || 'Current File')}
+      </span>
+
+      <span style="color:var(--muted)">·</span>
+
+      <span id="file-language" aria-label="Source programming language">
+        ${escapeHtml(data.sourceLanguage || 'Source language unavailable')}
+      </span>
+
+    </div>
+
+    <div class="language-area">
+
+      <label class="language-label" for="language">
+        Explanation language
+      </label>
+
+      <select id="language" aria-label="Explanation language">
+        ${languageOptions}
+      </select>
+
+    </div>
+
+  </div>
+
+  <section class="error-panel">
+
+    <div class="panel-heading">
+
+      <span class="heading-left">
+        <span class="heading-dot red-dot"></span>
+        Detected Errors
+      </span>
+
+      <span class="count-label" id="error-count">
+        ${errorCount} error${errorCount === 1 ? '' : 's'} detected
+      </span>
+
+    </div>
+
+    <div class="table-wrapper">
+
+      <table>
+
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Line</th>
+            <th>Type</th>
+            <th>Error</th>
+            <th>File</th>
+          </tr>
+        </thead>
+
+        <tbody id="error-rows">
+          ${errors}
+        </tbody>
+
+      </table>
+
+    </div>
+
+  </section>
+
+  <section class="content-section">
+
+    <div class="section-heading explanation-heading">
+      <span class="section-icon">ⓘ</span>
+      WHY THIS HAPPENED
+    </div>
+
+    <div
+      class="explanation-list"
+      id="explanation-list"
+    >
+      ${explanationCards}
+    </div>
+
+  </section>
+
+  <section class="content-section">
+
+    <div class="section-heading fix-heading">
+      <span class="section-icon">⚒</span>
+      HOW TO FIX IT
+    </div>
+
+    <div class="fix-card">
+
+      <div class="fix-controls">
+
+        <span
+          class="fix-status"
+          id="fix-status"
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+        >
+          Your suggested fix unlocks in 15 seconds.
+        </span>
+
+        <span class="fix-status" id="fix-countdown" aria-live="off">
+          15s
+        </span>
+
+      </div>
+
+      <button
+        class="fix-toggle"
+        id="fix-toggle"
+        type="button"
+        aria-label="Show or hide the consolidated code fix"
+        aria-expanded="false"
+        aria-controls="fix-content"
+        disabled
+      >
+        <span id="fix-toggle-label">
+          ✓ Show Code Fix
+        </span>
+
+        <span id="fix-arrow">⌄</span>
+      </button>
+
+      <div class="fix-content" id="fix-content">
+
+        <p class="fix-description">
+          Consolidated correction for the entire source file.
+        </p>
+
+        <div class="code-block">
+
+          <pre id="fix-code">${escapeHtml(data.fix)}</pre>
+
+          <div class="code-actions">
+
+            <button
+              class="copy-button"
+              id="copy-button"
+              type="button"
+              aria-label="Copy the consolidated code fix"
+            >
+              Copy
+            </button>
+
+            <span
+              class="sr-only"
+              id="copy-status"
+              role="status"
+              aria-live="polite"
+              aria-atomic="true"
+            ></span>
+
+          </div>
+
+        </div>
+
+      </div>
+
+    </div>
+
+  </section>
+
+  <section class="content-section">
+
+    <div class="section-heading remember-heading">
+      <span class="section-icon">◉</span>
+      REMEMBER FOR NEXT TIME
+    </div>
+
+    <div class="content-card remember-card">
+
+      <div class="remember-text" id="remember">
+        ${escapeHtml(data.remember)}
+      </div>
+
+    </div>
+
+  </section>
+
+  <footer class="footer">
+
+    <img
+      class="footer-logo"
+      src="${logo}"
+      alt="Code Equalize"
+    >
+
+    <span>
+      © 2026 Code Equalize. All rights reserved.
+    </span>
+
+  </footer>
+
+</div>
+
+<div
+  class="sr-only"
+  id="action-status"
+  role="status"
+  aria-live="polite"
+  aria-atomic="true"
+></div>
+
+<script nonce="${nonce}">
+
+const vscode = acquireVsCodeApi();
+
+const languageSelect =
+  document.getElementById('language');
+
+const loader =
+  document.getElementById('loader');
+
+const fixToggle =
+  document.getElementById('fix-toggle');
+
+const fixToggleLabel =
+  document.getElementById('fix-toggle-label');
+
+const fixArrow =
+  document.getElementById('fix-arrow');
+
+const fixContent =
+  document.getElementById('fix-content');
+
+const fixStatus =
+  document.getElementById('fix-status');
+
+const fixCountdown =
+  document.getElementById('fix-countdown');
+
+const copyButton =
+  document.getElementById('copy-button');
+
+const copyStatus =
+  document.getElementById('copy-status');
+
+const actionStatus =
+  document.getElementById('action-status');
+
+const supportedLanguages =
+  ${JSON.stringify(SUPPORTED_LANGUAGES)};
+const languageRequestPrefix =
+  ${JSON.stringify(nonce)} + '-language-';
+const copyRequestPrefix =
+  ${JSON.stringify(nonce)};
+
+let remaining = 15;
+let countdownTimer = null;
+let unlocked = false;
+let languageRequestSequence = 0;
+let activeLanguageRequestId = null;
+let activeRequestedLanguage = null;
+let copyFeedbackTimer = null;
+let copyRequestSequence = 0;
+let pendingCopyRequestId = null;
+
+let currentLanguage =
+  ${JSON.stringify(data.targetLanguage)};
+
+/**
+ * Starts the existing 15-second fix countdown.
+ */
+function clearFixCountdown() {
+  if (countdownTimer !== null) {
+    clearInterval(countdownTimer);
+    countdownTimer = null;
+  }
+}
+
+function startFixCountdown() {
+  clearFixCountdown();
+
+  remaining = 15;
+  unlocked = false;
+
+  fixToggle.disabled = true;
+  fixToggle.setAttribute('aria-expanded', 'false');
+
+  fixToggleLabel.textContent = '✓ Show Code Fix';
+  fixArrow.textContent = '⌄';
+
+  fixContent.classList.remove('visible');
+
+  fixStatus.textContent =
+    'Your suggested fix unlocks in 15 seconds.';
+
+  fixCountdown.textContent = '15s';
+
+  const timerId = setInterval(() => {
+    if (countdownTimer !== timerId || unlocked) {
+      return;
+    }
+
+    remaining = Math.max(0, remaining - 1);
+
+    fixCountdown.textContent = remaining + 's';
+
+    if (remaining === 0) {
+      clearInterval(timerId);
+      countdownTimer = null;
+
+      unlocked = true;
+      fixToggle.disabled = false;
+
+      fixStatus.textContent =
+        'Your suggested fix is ready.';
+
+      fixCountdown.textContent = 'Ready';
     }
   }, 1000);
 
-  let fixOpen = false;
-  function toggleFix() {
-    fixOpen = !fixOpen;
-    document.getElementById('fixCollapse').classList.toggle('open', fixOpen);
-    document.getElementById('toggleChevron').classList.toggle('open', fixOpen);
-    document.getElementById('toggleLabel').textContent = fixOpen ? '🔼 Hide Code Fix' : '✅ Show Code Fix';
+  countdownTimer = timerId;
+}
+
+function getErrorTypeLabel(type) {
+  if (type === 'runtime') {
+    return 'Runtime Error';
   }
 
-  function copyCode(btn, encoded) {
-    const text = decodeURIComponent(encoded);
-    const doFlash = () => {
-      btn.classList.add('copied');
-      const orig = btn.innerHTML;
-      btn.innerHTML = \`<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 12 4 10"/><line x1="4" y1="10" x2="4" y2="18"/><polyline points="4 18 20 18"/></svg> Copied!\`;
-      setTimeout(() => { btn.classList.remove('copied'); btn.innerHTML = orig; }, 2000);
-    };
-    navigator.clipboard.writeText(text).then(doFlash).catch(() => {
-      const ta = document.createElement('textarea');
-      ta.value = text; ta.style.cssText = 'position:fixed;opacity:0';
-      document.body.appendChild(ta); ta.select(); document.execCommand('copy');
-      document.body.removeChild(ta); doFlash();
-    });
+  if (type === 'potential') {
+    return 'Potential Issue';
   }
+
+  return 'Diagnostic Error';
+}
+
+function getErrorTypeTooltip(type) {
+  if (type === 'runtime') {
+    return 'Runtime Error: An error reported by the debugger while the program was executing.';
+  }
+
+  if (type === 'potential') {
+    return 'Potential Issue: A high-confidence static concern that may cause a runtime problem.';
+  }
+
+  return 'Diagnostic Error: An issue reported by a language analyzer, compiler, or editor diagnostic provider.';
+}
+
+/**
+ * Updates the combined error-type and source indicators.
+ */
+ function updateStatus(data)
+ {
+  const errors = data.errors?.length
+   ? data.errors
+    : data.explanations || [];
+
+  const types = new Set(
+    errors.map(error => error.errorType || 'diagnostic')
+  );
+
+  const labels = [];
+
+  if (types.has('runtime')) {
+    labels.push('Runtime');
+  }
+
+  if (types.has('diagnostic')) {
+    labels.push('Diagnostic');
+  }
+
+  if (types.has('potential')) {
+    labels.push('Potential');
+  }
+
+  const typeLabel =
+    document.getElementById('error-type-label');
+
+  const typeStatus =
+    document.getElementById('error-type-status');
+
+  if (typeLabel && typeStatus) {
+    if (labels.length <= 1) {
+      typeLabel.textContent =
+        labels[0] === 'Potential'
+          ? 'Potential Issue'
+          : (labels[0] || 'Diagnostic') + ' Error';
+    } else {
+      typeLabel.textContent =
+        labels.join(' & ') + ' Errors';
+    }
+
+    const descriptions = [];
+
+    if (types.has('runtime')) {
+      descriptions.push(getErrorTypeTooltip('runtime'));
+    }
+
+    if (types.has('diagnostic')) {
+      descriptions.push(getErrorTypeTooltip('diagnostic'));
+    }
+
+    if (types.has('potential')) {
+      descriptions.push(getErrorTypeTooltip('potential'));
+    }
+
+    typeStatus.title = descriptions.join('\\n\\n');
+  }
+
+  const source = data.source || 'Backend';
+const normalizedSource = String(source).toLowerCase();
+
+const sourceLabel =
+  document.getElementById('source-label');
+
+const sourceStatus =
+  document.getElementById('source-status');
+
+if (sourceLabel && sourceStatus) {
+  sourceLabel.textContent =
+    normalizedSource === 'chromadb'
+      ? 'ChromaDB'
+      : source;
+
+  if (normalizedSource === 'mixed') {
+    sourceStatus.title =
+      'Mixed: Some errors had accepted matching examples from ChromaDB, while others required AI generation. Groq generated the current explanations and consolidated fix.';
+  } else if (normalizedSource === 'chromadb') {
+    sourceStatus.title =
+      'ChromaDB: Similar programming-error examples were retrieved as supporting context. Groq generated the current explanations and consolidated fix.';
+  } else if (normalizedSource === 'ai') {
+    sourceStatus.title =
+      'AI: Groq generated this response without accepted matching examples from the ChromaDB knowledge base.';
+  } else {
+    sourceStatus.title =
+      'Explanation source information is unavailable.';
+  }
+}
+}
+
+/**
+ * Renders all errors safely using DOM text nodes.
+ */
+function renderErrors(data) {
+  const rowsContainer =
+    document.getElementById('error-rows');
+
+  rowsContainer.replaceChildren();
+
+  const updatedErrors = data.errors?.length
+    ? data.errors
+    : (data.explanations || []).map(item => ({
+        id: item.id,
+        errorMessage: item.errorMessage || item.error,
+        fileName: item.fileName || data.fileName,
+        lineNumber: item.lineNumber,
+        errorType: item.errorType
+      }));
+
+  updatedErrors
+    .slice()
+    .sort((a, b) =>
+      lineSortValue(a.lineNumber) -
+      lineSortValue(b.lineNumber)
+    )
+    .forEach((error, index) => {
+      const row = document.createElement('tr');
+
+      row.className = 'error-row';
+      row.dataset.errorIndex = String(index);
+
+      const values = [
+        String(index + 1),
+
+        typeof error.lineNumber === 'number' &&
+        isValidLineNumber(error.lineNumber)
+          ? String(error.lineNumber + 1)
+          : '—',
+
+        getErrorTypeLabel(error.errorType || 'diagnostic'),
+
+        error.errorMessage || '',
+
+        error.fileName || data.fileName || '—'
+      ];
+
+      values.forEach((value, cellIndex) => {
+        const cell = document.createElement('td');
+
+        if (cellIndex === 0) {
+          cell.className = 'index-cell';
+        } else if (cellIndex === 1) {
+          cell.className = 'line-cell';
+        } else if (cellIndex === 3) {
+          cell.className = 'error-message';
+        } else if (cellIndex === 4) {
+          cell.className = 'file-cell';
+        }
+
+        if (cellIndex === 2) {
+          const badge = document.createElement('span');
+
+          badge.className = 'error-badge';
+
+          badge.title = getErrorTypeTooltip(
+            error.errorType || 'diagnostic'
+          );
+
+          badge.textContent = value;
+
+          cell.appendChild(badge);
+        } else {
+          cell.textContent = value;
+        }
+
+        row.appendChild(cell);
+      });
+
+      rowsContainer.appendChild(row);
+    });
+
+  document.getElementById('error-count').textContent =
+    updatedErrors.length +
+    ' error' +
+    (updatedErrors.length === 1 ? '' : 's') +
+    ' detected';
+}
+
+/**
+ * Renders individual explanations in line-number order.
+ */
+function renderExplanations(data) {
+  const list =
+    document.getElementById('explanation-list');
+
+  list.replaceChildren();
+
+  const explanations = (data.explanations || [])
+    .slice()
+    .sort((a, b) =>
+      lineSortValue(a.lineNumber) -
+      lineSortValue(b.lineNumber)
+    );
+
+  explanations.forEach((item, index) => {
+    const article = document.createElement('article');
+
+    article.className = 'explanation-card-block';
+
+    article.dataset.explanationId =
+      item.id || String(index);
+
+    const header = document.createElement('div');
+
+    header.className = 'explanation-card-header';
+
+    const title = document.createElement('div');
+
+    title.className = 'explanation-card-title';
+
+    const indexLabel = document.createElement('span');
+
+    indexLabel.className = 'explanation-index';
+    indexLabel.textContent = 'Error ' + (index + 1);
+
+    const badge = document.createElement('span');
+
+    badge.className = 'error-badge';
+
+    badge.title = getErrorTypeTooltip(
+      item.errorType || 'diagnostic'
+    );
+
+    badge.textContent = getErrorTypeLabel(
+      item.errorType || 'diagnostic'
+    );
+
+    const line = document.createElement('span');
+
+    line.className = 'explanation-line';
+
+    line.textContent =
+      'Line ' +
+      (
+        typeof item.lineNumber === 'number' &&
+        isValidLineNumber(item.lineNumber)
+          ? item.lineNumber + 1
+          : '—'
+      );
+
+    title.appendChild(indexLabel);
+    title.appendChild(badge);
+    title.appendChild(line);
+
+    if (item.source) {
+      const source = document.createElement('span');
+
+      source.className = 'individual-source';
+      source.textContent = item.source;
+
+      title.appendChild(source);
+    }
+
+    const matched = document.createElement('div');
+
+    matched.className = 'matched-error';
+
+    matched.textContent =
+      item.matchedError ||
+      item.errorMessage ||
+      item.error ||
+      '';
+
+    header.appendChild(title);
+    header.appendChild(matched);
+
+    const card = document.createElement('div');
+
+    card.className =
+      'content-card explanation-card';
+
+    const text = document.createElement('div');
+
+    text.className = 'explanation-text';
+
+    text.innerHTML = renderMarkdownHtml(
+  item.failureMessage
+    ? 'Explanation unavailable: ' + item.failureMessage
+    : item.explanation || ''
+);
+
+    card.appendChild(text);
+
+    article.appendChild(header);
+    article.appendChild(card);
+
+    list.appendChild(article);
+  });
+}
+
+/**
+ * Validates extension-host data before the webview updates its current content.
+ */
+function isRecord(value) {
+  return value !== null &&
+    typeof value === 'object' &&
+    !Array.isArray(value);
+}
+
+function isValidErrorType(value) {
+  return (
+    value === undefined ||
+    value === 'diagnostic' ||
+    value === 'runtime' ||
+    value === 'potential'
+  );
+}
+
+function isValidLineNumber(value) {
+  return value === undefined ||
+    (
+      typeof value === 'number' &&
+      Number.isFinite(value) &&
+      Number.isInteger(value) &&
+      value >= 0
+    );
+}
+
+function lineSortValue(value) {
+  return typeof value === 'number' && isValidLineNumber(value)
+    ? value
+    : Number.MAX_SAFE_INTEGER;
+}
+
+function isValidErrorEntry(value) {
+  return isRecord(value) &&
+    typeof value.errorMessage === 'string' &&
+    (value.id === undefined || typeof value.id === 'string') &&
+    (value.fileName === undefined || typeof value.fileName === 'string') &&
+    isValidLineNumber(value.lineNumber) &&
+    isValidErrorType(value.errorType);
+}
+
+function isValidExplanation(value) {
+  return isRecord(value) &&
+    typeof value.id === 'string' &&
+    value.id.trim().length > 0 &&
+    typeof value.errorMessage === 'string' &&
+    typeof value.explanation === 'string' &&
+    (value.fileName === undefined || typeof value.fileName === 'string') &&
+    isValidLineNumber(value.lineNumber) &&
+    isValidErrorType(value.errorType) &&
+    (value.source === undefined || typeof value.source === 'string') &&
+    (value.matchedError === undefined || typeof value.matchedError === 'string') &&
+    (value.distance === undefined ||
+      value.distance === null ||
+      (typeof value.distance === 'number' && Number.isFinite(value.distance))) &&
+    (value.failureMessage === undefined ||
+      typeof value.failureMessage === 'string');
+}
+
+function isValidPanelData(value) {
+  if (
+    !isRecord(value) ||
+    !supportedLanguages.includes(value.targetLanguage) ||
+    typeof value.sourceLanguage !== 'string' ||
+    !Array.isArray(value.explanations) ||
+    !value.explanations.every(isValidExplanation) ||
+    typeof value.fix !== 'string' ||
+    typeof value.remember !== 'string' ||
+    (value.source !== undefined && typeof value.source !== 'string') ||
+    (value.fileName !== undefined && typeof value.fileName !== 'string') ||
+    (value.errors !== undefined &&
+      (!Array.isArray(value.errors) ||
+        !value.errors.every(isValidErrorEntry)))
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+function finishLanguageRequest(requestId, message) {
+  if (
+    typeof requestId !== 'string' ||
+    requestId !== activeLanguageRequestId
+  ) {
+    return false;
+  }
+
+  activeLanguageRequestId = null;
+  activeRequestedLanguage = null;
+  loader.classList.remove('visible');
+  languageSelect.disabled = false;
+  languageSelect.value = currentLanguage;
+  actionStatus.textContent = message;
+
+  return true;
+}
+
+/**
+ * Applies a successful language update.
+ */
+function applyUpdate(data) {
+  if (!isValidPanelData(data)) {
+    return false;
+  }
+
+  const fixCode = document.getElementById('fix-code');
+  const fixChanged = fixCode.textContent !== data.fix;
+
+  document.getElementById('file-name').textContent =
+    data.fileName || 'Current File';
+
+  renderErrors(data);
+  renderExplanations(data);
+
+  fixCode.textContent = data.fix;
+
+  document.getElementById('remember').textContent = data.remember;
+
+  updateStatus(data);
+
+  currentLanguage = data.targetLanguage;
+  languageSelect.value = currentLanguage;
+
+  if (fixChanged) {
+    startFixCountdown();
+  }
+
+  languageSelect.disabled = false;
+  loader.classList.remove('visible');
+  actionStatus.textContent = 'Explanation updated.';
+
+  return true;
+}
+
+/**
+ * Starts the initial countdown.
+ */
+startFixCountdown();
+
+/**
+ * Shows or hides the consolidated code fix.
+ */
+fixToggle.addEventListener('click', () => {
+  if (!unlocked) {
+    return;
+  }
+
+  const visible =
+    fixContent.classList.toggle('visible');
+
+  fixToggleLabel.textContent = visible
+    ? '✓ Hide Code Fix'
+    : '✓ Show Code Fix';
+
+  fixArrow.textContent = visible ? '⌃' : '⌄';
+  fixToggle.setAttribute('aria-expanded', String(visible));
+});
+
+function showCopyFeedback(label, announcement) {
+  if (pendingCopyRequestId !== null) {
+    return;
+  }
+
+  if (copyFeedbackTimer !== null) {
+    clearTimeout(copyFeedbackTimer);
+  }
+
+  copyButton.disabled = false;
+  copyButton.textContent = label;
+  copyStatus.textContent = announcement;
+
+  copyFeedbackTimer = window.setTimeout(() => {
+    copyButton.textContent = 'Copy';
+    copyStatus.textContent = '';
+    copyFeedbackTimer = null;
+  }, 1500);
+}
+
+/**
+ * Copies code through the VS Code extension host.
+ * This avoids relying on browser clipboard permissions.
+ */
+copyButton.addEventListener('click', () => {
+  if (copyButton.disabled) {
+    return;
+  }
+
+  const code =
+    document.getElementById('fix-code').textContent || '';
+
+  if (!code.trim()) {
+    showCopyFeedback(
+      'Nothing to copy',
+      'There is no code to copy.'
+    );
+    return;
+  }
+
+  if (copyFeedbackTimer !== null) {
+    clearTimeout(copyFeedbackTimer);
+    copyFeedbackTimer = null;
+  }
+
+  copyStatus.textContent = '';
+  copyButton.disabled = true;
+  copyButton.textContent = 'Copying...';
+  copyStatus.textContent = 'Copying code to the clipboard.';
+
+  const requestId =
+    copyRequestPrefix + '-' + String(++copyRequestSequence);
+
+  pendingCopyRequestId = requestId;
+
+  try {
+    vscode.postMessage({
+      command: 'copyFix',
+      text: code,
+      requestId
+    });
+  } catch (error) {
+    console.error('[Code Equalize] Could not request code copy:', error);
+
+    if (pendingCopyRequestId === requestId) {
+      pendingCopyRequestId = null;
+      showCopyFeedback('Copy failed', 'Could not copy the code.');
+    }
+  }
+});
+
+/**
+ * Requests explanations in another language.
+ */
+languageSelect.addEventListener('change', () => {
+  const requestedLanguage = languageSelect.value;
+
+  if (!supportedLanguages.includes(requestedLanguage)) {
+    languageSelect.value =
+      activeRequestedLanguage || currentLanguage;
+    return;
+  }
+
+  if (requestedLanguage === currentLanguage) {
+    languageSelect.value =
+      activeRequestedLanguage || currentLanguage;
+    return;
+  }
+
+  const requestId =
+    languageRequestPrefix + String(++languageRequestSequence);
+
+  activeLanguageRequestId = requestId;
+  activeRequestedLanguage = requestedLanguage;
+  loader.classList.add('visible');
+  languageSelect.disabled = true;
+  actionStatus.textContent =
+    'Changing explanation language to ' + requestedLanguage + '.';
+
+  try {
+    vscode.postMessage({
+      command: 'changeLanguage',
+      language: requestedLanguage,
+      requestId
+    });
+  } catch (error) {
+    console.error(
+      '[Code Equalize] Could not request language change:',
+      error
+    );
+    finishLanguageRequest(
+      requestId,
+      'Could not change the explanation language. The previous explanation is still available.'
+    );
+  }
+});
+
+/**
+ * Receives updates and copy results from the extension.
+ */
+window.addEventListener('message', event => {
+  const message = event.data;
+
+  if (!isRecord(message) || typeof message.command !== 'string') {
+    return;
+  }
+
+  if (message.command === 'update') {
+    const requestId = message.requestId;
+
+    if (
+      typeof requestId !== 'string' ||
+      requestId !== activeLanguageRequestId
+    ) {
+      return;
+    }
+
+    if (
+      !isValidPanelData(message.data) ||
+      message.data.targetLanguage !== activeRequestedLanguage ||
+      !applyUpdate(message.data)
+    ) {
+      finishLanguageRequest(
+        requestId,
+        'The explanation update was invalid. The previous explanation is still available.'
+      );
+      return;
+    }
+
+    activeLanguageRequestId = null;
+    activeRequestedLanguage = null;
+    return;
+  }
+
+  if (message.command === 'error') {
+    const errorMessage =
+      typeof message.error === 'string' &&
+      message.error.trim()
+        ? message.error
+        : 'Could not change the explanation language. The previous explanation is still available.';
+
+    finishLanguageRequest(message.requestId, errorMessage);
+
+    return;
+  }
+
+  if (message.command === 'copyResult') {
+    if (
+      typeof message.requestId !== 'string' ||
+      message.requestId !== pendingCopyRequestId
+    ) {
+      return;
+    }
+
+    pendingCopyRequestId = null;
+
+    showCopyFeedback(
+      message.success === true ? 'Copied!' : 'Copy failed',
+      message.success === true
+        ? 'Code copied to the clipboard.'
+        : 'Could not copy the code.'
+    );
+  }
+});
+
+window.addEventListener('beforeunload', () => {
+  clearFixCountdown();
+
+  if (copyFeedbackTimer !== null) {
+    clearTimeout(copyFeedbackTimer);
+    copyFeedbackTimer = null;
+  }
+});
+
+window.addEventListener('pagehide', () => {
+  clearFixCountdown();
+
+  if (copyFeedbackTimer !== null) {
+    clearTimeout(copyFeedbackTimer);
+    copyFeedbackTimer = null;
+  }
+});
+
 </script>
+
 </body>
 </html>`;
+}
+
+/**
+ * Opens the Code Equalize panel and manages webview messages.
+ */
+export function showPanel(
+  data: PanelData,
+  onLanguageChange: LanguageChangeHandler,
+  extensionUri: vscode.Uri,
+  getCurrentLanguage?: () => string
+): void {
+  const sessionId = ++panelSessionSequence;
+
+  if (currentPanel) {
+    currentPanel.reveal(vscode.ViewColumn.Beside);
+  } else {
+    const panel = vscode.window.createWebviewPanel(
+      'codeEqualize',
+      'Code Equalize',
+      vscode.ViewColumn.Beside,
+      {
+        enableScripts: true,
+
+        localResourceRoots: [
+          vscode.Uri.joinPath(extensionUri, 'media')
+        ]
+      }
+    );
+
+    currentPanel = panel;
+
+    panel.iconPath = vscode.Uri.joinPath(
+      extensionUri,
+      'media',
+      'code-equalize-icon.png'
+    );
+
+    panel.onDidDispose(() => {
+      if (currentPanel === panel) {
+        messageListener?.dispose();
+        messageListener = undefined;
+        currentPanel = undefined;
+      }
+    });
+  }
+
+  const panel = currentPanel;
+  const webview = panel.webview;
+
+  const nonce = getNonce();
+  const requestIdPrefix = `${nonce}-language-`;
+  const copyRequestIdPrefix = `${nonce}-`;
+  let latestLanguageRequestSequence = 0;
+  let latestLanguageRequestId: string | undefined;
+
+  const isCurrentSession = (): boolean =>
+    currentPanel === panel &&
+    panelSessionSequence === sessionId;
+
+  messageListener?.dispose();
+  messageListener = undefined;
+
+  panel.title = 'Code Equalize';
+
+  webview.html = getHtml(
+    webview,
+    extensionUri,
+    data,
+    nonce
+  );
+
+  messageListener = webview.onDidReceiveMessage(
+    async message => {
+      if (!isRecord(message) || typeof message.command !== 'string') {
+        return;
+      }
+
+      /**
+       * Handle language changes.
+       */
+      if (message.command === 'changeLanguage') {
+        const requestId = message.requestId;
+
+        if (
+          typeof requestId !== 'string' ||
+          !requestId.startsWith(requestIdPrefix)
+        ) {
+          return;
+        }
+
+        const sequenceText = requestId.slice(requestIdPrefix.length);
+        const requestSequence = Number(sequenceText);
+
+        if (
+          !/^[1-9]\d*$/.test(sequenceText) ||
+          !Number.isSafeInteger(requestSequence) ||
+          requestSequence <= latestLanguageRequestSequence
+        ) {
+          return;
+        }
+
+        latestLanguageRequestSequence = requestSequence;
+        latestLanguageRequestId = requestId;
+
+        try {
+          if (
+            typeof message.language !== 'string' ||
+            !SUPPORTED_LANGUAGES.includes(message.language)
+          ) {
+            throw new Error(
+              'Unsupported explanation language.'
+            );
+          }
+
+          const updatedData =
+            await onLanguageChange(message.language, requestId);
+
+          if (
+            !isValidPanelData(updatedData) ||
+            updatedData.targetLanguage !== message.language
+          ) {
+            throw new Error(
+              'The explanation service returned invalid panel data.'
+            );
+          }
+
+          if (
+            isCurrentSession() &&
+            latestLanguageRequestId === requestId
+          ) {
+            await panel.webview.postMessage({
+              command: 'update',
+              data: updatedData,
+              requestId
+            });
+          }
+        } catch (error) {
+          const errorMessage =
+            error instanceof Error
+              ? error.message
+              : 'Could not generate the explanation.';
+
+          if (
+            isCurrentSession() &&
+            latestLanguageRequestId === requestId
+          ) {
+            vscode.window.showErrorMessage(
+              `Code Equalize: ${errorMessage}`
+            );
+
+            await panel.webview.postMessage({
+              command: 'error',
+              error: errorMessage,
+              language:
+                getCurrentLanguage?.() ??
+                data.targetLanguage,
+              requestId
+            });
+          }
+        }
+
+        return;
+      }
+
+      /**
+       * Handle code copying through VS Code.
+       */
+      if (message.command === 'copyFix') {
+        const requestId = message.requestId;
+        const sequenceText =
+          typeof requestId === 'string' &&
+          requestId.startsWith(copyRequestIdPrefix)
+            ? requestId.slice(copyRequestIdPrefix.length)
+            : '';
+        const requestSequence = Number(sequenceText);
+
+        if (
+          !/^[1-9]\d*$/.test(sequenceText) ||
+          !Number.isSafeInteger(requestSequence)
+        ) {
+          return;
+        }
+
+        try {
+          if (
+            typeof message.text !== 'string' ||
+            !message.text.trim()
+          ) {
+            throw new Error('There is no code to copy.');
+          }
+
+          await vscode.env.clipboard.writeText(message.text);
+
+          if (isCurrentSession()) {
+            await panel.webview.postMessage({
+              command: 'copyResult',
+              success: true,
+              requestId
+            });
+          }
+        } catch (error) {
+          console.error(
+            '[Code Equalize] Code copy failed:',
+            error
+          );
+
+          if (isCurrentSession()) {
+            await panel.webview.postMessage({
+              command: 'copyResult',
+              success: false,
+              requestId
+            });
+          }
+        }
+      }
+    }
+  );
 }
