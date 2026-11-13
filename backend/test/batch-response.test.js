@@ -108,6 +108,8 @@ test("source extraction preserves code that contains Markdown-like fences", () =
     "````python",
     source,
     "````",
+    "What was fixed:",
+    "- Kept the documentation string unchanged.",
     "Remember:",
     "Remember both lessons."
   ].join("\n");
@@ -127,8 +129,8 @@ test("batch prompt sends source and selected explanation languages separately", 
     knowledgeContexts: []
   });
 
-  assert.match(prompt, /Programming language:\nPython/);
-  assert.match(prompt, /selected explanation language is:\nHindi/);
+  assert.match(prompt, /Programming language: Python/);
+  assert.match(prompt, /selected explanation language is Hindi/);
   assert.match(prompt, /id=runtime\|4\|zerodivisionerror/);
-  assert.match(prompt, /practical takeaway for EACH listed error/i);
+  assert.match(prompt, /lessons from ALL issues/i);
 });

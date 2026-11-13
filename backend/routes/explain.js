@@ -16,6 +16,31 @@ const VALID_ERROR_TYPES = [
   "potential"
 ];
 
+const MAX_BATCH_ERRORS = 20;
+const MAX_RELATED_DIAGNOSTICS = 10;
+
+/**
+ * Cascading diagnostics grouped under one root cause by the extension.
+ */
+function isValidRelatedDiagnostics(value) {
+  return (
+    Array.isArray(value) &&
+    value.length <= MAX_RELATED_DIAGNOSTICS &&
+    value.every(entry =>
+      entry &&
+      typeof entry === "object" &&
+      !Array.isArray(entry) &&
+      typeof entry.message === "string" &&
+      entry.message.trim().length > 0 &&
+      entry.message.length <= 500 &&
+      (
+        entry.lineNumber === undefined ||
+        (Number.isInteger(entry.lineNumber) && entry.lineNumber >= 0)
+      )
+    )
+  );
+}
+
 function validateCommonFields(body) {
   if (!body || typeof body !== "object" || Array.isArray(body)) {
     return "Invalid request body: expected a JSON object.";
@@ -103,7 +128,9 @@ router.post("/", async (req, res) => {
  * POST /explain/all
  *
  * Generates one explanation per error, together with
- * one consolidated code fix and one Remember section.
+ * one consolidated code fix, What was fixed, and one Remember section.
+ * With analyzeSource=true Groq also reports additional issues it infers
+ * from the complete source (marked "potential").
  */
 router.post("/all", async (req, res) => {
   console.log("[Explain All] Batch request received");
@@ -121,11 +148,37 @@ router.post("/all", async (req, res) => {
       });
     }
 
-    const { errors } = req.body;
+    const { errors, analyzeSource = false, fileName } = req.body;
 
-    if (!Array.isArray(errors) || errors.length === 0) {
+    if (typeof analyzeSource !== "boolean") {
       return res.status(400).json({
-        error: '"errors" must be a non-empty array.'
+        error: '"analyzeSource" must be a boolean when provided.'
+      });
+    }
+
+    if (
+      fileName !== undefined &&
+      (typeof fileName !== "string" || fileName.length > 260)
+    ) {
+      return res.status(400).json({
+        error: '"fileName" must be a string of at most 260 characters.'
+      });
+    }
+
+    // With whole-source analysis the list may be empty: Groq then looks
+    // for problems (including potential runtime risks) on its own.
+    if (
+      !Array.isArray(errors) ||
+      (errors.length === 0 && !analyzeSource)
+    ) {
+      return res.status(400).json({
+        error: '"errors" must be a non-empty array unless "analyzeSource" is true.'
+      });
+    }
+
+    if (errors.length > MAX_BATCH_ERRORS) {
+      return res.status(400).json({
+        error: `"errors" may contain at most ${MAX_BATCH_ERRORS} items.`
       });
     }
 
@@ -176,13 +229,24 @@ router.post("/all", async (req, res) => {
           error: `Invalid errorType for error id=${item.id}.`
         });
       }
+
+      if (
+        item.relatedDiagnostics !== undefined &&
+        !isValidRelatedDiagnostics(item.relatedDiagnostics)
+      ) {
+        return res.status(400).json({
+          error: `Invalid relatedDiagnostics for error id=${item.id}.`
+        });
+      }
     }
 
     const result = await ragService.processAllErrors({
       code: req.body.code,
       language: req.body.language,
       targetLanguage: req.body.targetLanguage,
-      errors
+      errors,
+      fileName,
+      analyzeSource
     });
 
     return res.status(200).json(result);

@@ -9,7 +9,15 @@ let groq;
 
 const MODEL = "openai/gpt-oss-120b";
 const MAX_COMPLETION_TOKENS = 4096;
-const MAX_BATCH_COMPLETION_TOKENS = 8192;
+// gpt-oss-120b is a reasoning model: reasoning tokens count toward the
+// completion limit, and a full corrected file plus explanations in an Indic
+// language can be long. A truncated response is rejected, never shown.
+const MAX_BATCH_COMPLETION_TOKENS = 16384;
+
+// Keep the Groq call (including its single SDK retry) shorter than the
+// extension's batch request timeout, so the backend always answers with a
+// result or an error before the client gives up.
+const GROQ_TIMEOUT_MS = 60000;
 
 function getGroqClient() {
   if (!GROQ_API_KEY) {
@@ -21,7 +29,9 @@ function getGroqClient() {
 
   if (!groq) {
     groq = new Groq({
-      apiKey: GROQ_API_KEY
+      apiKey: GROQ_API_KEY,
+      timeout: GROQ_TIMEOUT_MS,
+      maxRetries: 1
     });
   }
 
@@ -36,7 +46,33 @@ function cleanOuterMarkdown(text) {
     .trim();
 }
 
-/** Return only the one complete source block required by the batch contract. */
+
+const LINE_PREFIX_PATTERN = /^\s*\d+ \| ?/;
+
+/**
+ * Removes "N | " listing prefixes if the model copied them into the
+ * corrected file. Only applied when every non-empty line carries one.
+ */
+function stripLineNumberPrefixes(source) {
+  const lines = source.split("\n");
+  const nonEmpty = lines.filter(line => line.trim());
+
+  if (
+    nonEmpty.length === 0 ||
+    !nonEmpty.every(line => LINE_PREFIX_PATTERN.test(line))
+  ) {
+    return source;
+  }
+
+  return lines
+    .map(line => line.replace(LINE_PREFIX_PATTERN, ""))
+    .join("\n");
+}
+
+/**
+ * Return the one complete source block required by the batch contract,
+ * together with any prose written around the fence.
+ */
 function extractConsolidatedSource(fix, language) {
   // Match Markdown fences by their full delimiter length. This lets source
   // contain triple backticks when the enclosing block uses four or more.
@@ -48,13 +84,13 @@ function extractConsolidatedSource(fix, language) {
     );
   }
 
-  const [, , label, source] = blocks[0];
+  const [whole, , label, source] = blocks[0];
   const normalizedLabel = label.trim().toLowerCase().replace(/^language-/, "");
   const expectedLabels = {
     "C++": new Set(["cpp", "c++", "cxx"]),
     "C": new Set(["c"]),
     "Java": new Set(["java"]),
-    "Python": new Set(["python", "py"])
+    "Python": new Set(["python", "py", "python3"])
   };
   const accepted = expectedLabels[language];
 
@@ -66,7 +102,18 @@ function extractConsolidatedSource(fix, language) {
 
   // The newline immediately before the closing fence is Markdown framing,
   // not part of the program text.
-  return source.replace(/\r?\n$/, "");
+  const code = stripLineNumberPrefixes(source.replace(/\r?\n$/, ""));
+
+  if (!code.trim()) {
+    throw new Error("The AI returned an empty corrected source file.");
+  }
+
+  const start = blocks[0].index;
+  const prose = (
+    fix.slice(0, start) + "\n" + fix.slice(start + whole.length)
+  ).trim();
+
+  return { code, prose };
 }
 
 function parseExplanationResponse(rawText) {
@@ -125,15 +172,89 @@ function parseExplanationResponse(rawText) {
   return sections;
 }
 
+
+const MAX_ADDITIONAL_ISSUES = 10;
+const NO_ISSUES_MARKER = "NO_ISSUES_FOUND";
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 /**
- * Parses a multi-error batch response into explanations[], fix, remember.
+ * Splits an issue block into its "Error type:", "Summary:" and
+ * explanation paragraph. The labels are optional for compatibility.
  */
-function parseBatchExplanationResponse(rawText, expectedErrors, language) {
+function splitIssueContent(content) {
+  let issueType = "";
+  let summary = "";
+  const remaining = [];
+
+  for (const line of content.split(/\r?\n/)) {
+    const typeMatch = !issueType &&
+      line.match(/^\s*(?:[-*]\s*)?(?:\*\*|__)?Error type(?:\*\*|__)?\s*:\s*(?:\*\*|__)?\s*(.*?)\s*(?:\*\*|__)?\s*$/i);
+    if (typeMatch) {
+      issueType = typeMatch[1].trim();
+      continue;
+    }
+
+    const summaryMatch = !summary &&
+      line.match(/^\s*(?:[-*]\s*)?(?:\*\*|__)?Summary(?:\*\*|__)?\s*:\s*(?:\*\*|__)?\s*(.*?)\s*$/i);
+    if (summaryMatch) {
+      summary = summaryMatch[1].replace(/(?:\*\*|__)$/, "").trim();
+      continue;
+    }
+
+    remaining.push(line);
+  }
+
+  return {
+    issueType: issueType.replace(/[.。]$/, "").slice(0, 80),
+    summary: summary.slice(0, 400),
+    explanation: remaining.join("\n").trim()
+  };
+}
+
+function slugify(value) {
+  return String(value || "issue")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 40) || "issue";
+}
+
+/**
+ * Parses a coordinated batch response into explanations[], additional
+ * source-inferred issues, one corrected file, What was fixed, and Remember.
+ *
+ * Stable IDs are authoritative: every listed error must have exactly one
+ * explanation, unknown or duplicate IDs are rejected, and incomplete
+ * responses throw instead of being presented as complete.
+ */
+function parseBatchExplanationResponse(
+  rawText,
+  expectedErrors,
+  language,
+  options = {}
+) {
   if (typeof rawText !== "string" || !rawText.trim()) {
     throw new Error("The AI returned an empty response.");
   }
 
-  if (!Array.isArray(expectedErrors) || expectedErrors.length === 0) {
+  if (!Array.isArray(expectedErrors)) {
+    throw new Error("Batch parsing requires the expected error list.");
+  }
+
+  const analyzeSource = options.analyzeSource === true;
+  const lineCount =
+    Number.isInteger(options.lineCount) && options.lineCount > 0
+      ? options.lineCount
+      : Number.MAX_SAFE_INTEGER;
+  const maxAdditional =
+    Number.isInteger(options.maxAdditionalIssues)
+      ? options.maxAdditionalIssues
+      : MAX_ADDITIONAL_ISSUES;
+
+  if (expectedErrors.length === 0 && !analyzeSource) {
     throw new Error("Batch parsing requires the expected error list.");
   }
 
@@ -142,9 +263,15 @@ function parseBatchExplanationResponse(rawText, expectedErrors, language) {
   const escapedIds = expectedErrors
     .map(item => item.id)
     .sort((left, right) => right.length - left.length)
-    .map(id => id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+    .map(escapeRegExp);
+  const idPattern = escapedIds.length ? escapedIds.join("|") : "(?!)";
+
   const markerPattern = new RegExp(
-    `(?:^|\\n)\\s*(?:\\*\\*|__)?(Explanation\\s+(\\d+)\\s*\\[id=(${escapedIds.join("|")})\\]|Individual correction|Fix|Remember)\\s*:(?:\\*\\*|__)?\\s*`,
+    "(?:^|\\n)[ \\t]*(?:#{1,4}[ \\t]*)?(?:\\*\\*|__)?(" +
+      `Explanation\\s+(\\d+)\\s*\\[id=(${idPattern})\\]` +
+      "|Additional issue\\s+(\\d+)\\s*\\[line=([^\\]\\n]*)\\]" +
+      "|Individual correction|Correction status|Fix|What was fixed|Remember" +
+    ")\\s*:(?:\\*\\*|__)?[ \\t]*",
     "gi"
   );
 
@@ -153,13 +280,18 @@ function parseBatchExplanationResponse(rawText, expectedErrors, language) {
 
   while ((match = markerPattern.exec(text)) !== null) {
     const label = match[1].toLowerCase();
-
     let kind;
 
     if (label.startsWith("explanation")) {
       kind = "explanation";
+    } else if (label.startsWith("additional issue")) {
+      kind = "additional";
     } else if (label === "individual correction") {
       kind = "correction";
+    } else if (label === "correction status") {
+      kind = "status";
+    } else if (label === "what was fixed") {
+      kind = "whatWasFixed";
     } else {
       kind = label;
     }
@@ -168,15 +300,40 @@ function parseBatchExplanationResponse(rawText, expectedErrors, language) {
       kind,
       index: match[2] ? Number(match[2]) : undefined,
       id: match[3] ? match[3].trim() : undefined,
+      lineLabel: match[5] !== undefined ? match[5].trim() : undefined,
       start: match.index,
       contentStart: markerPattern.lastIndex
     });
   }
 
+  // A clean file: the model reports that nothing is wrong.
+  if (
+    expectedErrors.length === 0 &&
+    !markers.some(item =>
+      item.kind === "explanation" || item.kind === "additional"
+    ) &&
+    new RegExp(`(^|\\n)\\s*${NO_ISSUES_MARKER}\\b`).test(text)
+  ) {
+    return {
+      explanations: [],
+      additionalIssues: [],
+      fix: "",
+      whatWasFixed: "",
+      remember: "",
+      correctionStatus: "none",
+      noIssues: true
+    };
+  }
+
   const explanationsById = new Map();
+  const additionalIssues = [];
+  const usedAdditionalIds = new Set();
+  const seenAdditional = new Set();
 
   let fix = "";
+  let whatWasFixed = "";
   let remember = "";
+  let statusText = "";
 
   for (let i = 0; i < markers.length; i++) {
     const current = markers[i];
@@ -196,13 +353,72 @@ function parseBatchExplanationResponse(rawText, expectedErrors, language) {
 
       explanationsById.set(current.id, {
         index: current.index,
-        explanation: content,
+        ...splitIssueContent(content),
         individualCorrection: null
+      });
+    } else if (current.kind === "additional") {
+      if (!analyzeSource) {
+        // Additional findings were not requested; ignore them safely.
+        continue;
+      }
+
+      const parts = splitIssueContent(content);
+
+      if (!parts.explanation && !parts.summary) {
+        throw new Error("The AI returned an additional issue without an explanation.");
+      }
+
+      const lineValue = Number.parseInt(current.lineLabel, 10);
+      const lineNumber =
+        Number.isInteger(lineValue) &&
+        String(lineValue) === current.lineLabel &&
+        lineValue >= 1 &&
+        lineValue <= lineCount
+          ? lineValue - 1
+          : undefined;
+
+      const dedupeKey = `${lineNumber ?? "na"}|${parts.issueType.toLowerCase()}`;
+
+      if (seenAdditional.has(dedupeKey)) {
+        continue;
+      }
+
+      seenAdditional.add(dedupeKey);
+
+      if (additionalIssues.length >= maxAdditional) {
+        continue;
+      }
+
+      let id = `potential|${lineNumber ?? "na"}|${slugify(parts.issueType)}`;
+      let suffix = 2;
+
+      while (
+        usedAdditionalIds.has(id) ||
+        expectedErrors.some(item => item.id === id)
+      ) {
+        id = `potential|${lineNumber ?? "na"}|${slugify(parts.issueType)}-${suffix++}`;
+      }
+
+      usedAdditionalIds.add(id);
+
+      additionalIssues.push({
+        id,
+        error: parts.summary || parts.issueType || "Potential issue",
+        lineNumber,
+        errorType: "potential",
+        issueType: parts.issueType,
+        summary: parts.summary,
+        explanation: parts.explanation || parts.summary
       });
     } else if (current.kind === "correction") {
       const previous = markers[i - 1];
 
       if (!previous || previous.kind !== "explanation") {
+        // Corrections attached to additional issues are not stored.
+        if (previous && previous.kind === "additional") {
+          continue;
+        }
+
         throw new Error(
           "Individual correction must immediately follow its explanation."
         );
@@ -219,8 +435,12 @@ function parseBatchExplanationResponse(rawText, expectedErrors, language) {
       entry.individualCorrection = content;
     } else if (current.kind === "fix" && !fix) {
       fix = content;
+    } else if (current.kind === "whatWasFixed" && !whatWasFixed) {
+      whatWasFixed = content;
     } else if (current.kind === "remember" && !remember) {
       remember = content;
+    } else if (current.kind === "status" && !statusText) {
+      statusText = content;
     }
   }
 
@@ -240,14 +460,14 @@ function parseBatchExplanationResponse(rawText, expectedErrors, language) {
     }
   }
 
-  const explanations = expectedErrors.map((item, index) => {
+  const explanations = expectedErrors.map(item => {
     const generated = explanationsById.get(item.id);
 
     if (
-  !generated ||
-  !generated.explanation ||
-  !generated.individualCorrection
-) {
+      !generated ||
+      !generated.explanation ||
+      !generated.individualCorrection
+    ) {
       throw new Error(
         `The AI response is incomplete for error id=${item.id}.`
       );
@@ -260,6 +480,8 @@ function parseBatchExplanationResponse(rawText, expectedErrors, language) {
       error: item.error,
       lineNumber: item.lineNumber,
       errorType: item.errorType,
+      issueType: generated.issueType,
+      summary: generated.summary,
       explanation: generated.explanation,
       individualCorrection:
         correction === "NOT_SAFE_TO_STORE"
@@ -267,6 +489,10 @@ function parseBatchExplanationResponse(rawText, expectedErrors, language) {
           : correction
     };
   });
+
+  if (explanations.length + additionalIssues.length === 0) {
+    throw new Error("The AI response did not contain any issue explanations.");
+  }
 
   if (!fix) {
     throw new Error("The AI response is missing the Fix section.");
@@ -276,12 +502,29 @@ function parseBatchExplanationResponse(rawText, expectedErrors, language) {
     throw new Error("The AI response is missing the Remember section.");
   }
 
-  const correctedSource = extractConsolidatedSource(fix, language);
+  const { code: correctedSource, prose } =
+    extractConsolidatedSource(fix, language);
+
+  const fixedSummary = whatWasFixed || prose;
+
+  if (!fixedSummary) {
+    throw new Error("The AI response is missing the What was fixed section.");
+  }
+
+  // A missing status is treated conservatively: never claim completeness
+  // the model did not state.
+  const correctionStatus = /^\W*COMPLETE\b/i.test(statusText)
+    ? "complete"
+    : "partial";
 
   return {
     explanations,
+    additionalIssues,
     fix: correctedSource,
-    remember
+    whatWasFixed: fixedSummary,
+    remember,
+    correctionStatus,
+    noIssues: false
   };
 }
 
@@ -377,14 +620,16 @@ async function generateBatchExplanation({
   language,
   targetLanguage,
   errors,
-  knowledgeContexts = []
+  knowledgeContexts = [],
+  fileName,
+  analyzeSource = false
 }) {
   if (
     typeof code !== "string" || !code.trim() ||
     typeof language !== "string" || !language.trim() ||
     typeof targetLanguage !== "string" || !targetLanguage.trim() ||
     !Array.isArray(errors) ||
-    errors.length === 0
+    (errors.length === 0 && !analyzeSource)
   ) {
     const validationError = new Error(
       "Missing or invalid information required to generate batch explanations."
@@ -415,11 +660,15 @@ async function generateBatchExplanation({
       language,
       targetLanguage,
       errors,
-      knowledgeContexts
+      knowledgeContexts,
+      fileName,
+      analyzeSource,
+      maxAdditionalIssues: MAX_ADDITIONAL_ISSUES
     });
 
     console.log(
-      `[Groq] Generating batch explanation for ${errors.length} ${language} error(s) in ${targetLanguage}`
+      `[Groq] Generating batch explanation for ${errors.length} ${language} error(s) in ${targetLanguage}` +
+      `${analyzeSource ? " with whole-source analysis" : ""}`
     );
 
     const completion = await client.chat.completions.create({
@@ -429,8 +678,9 @@ async function generateBatchExplanation({
           role: "system",
           content:
             "You are Code Equalize, an expert beginner-friendly programming tutor. " +
-            "Explain every listed error, provide one consolidated full-file fix, " +
-            "provide a practical Remember takeaway for every listed error, and follow the output format exactly."
+            "Analyse the complete source file, explain every issue accurately, " +
+            "provide one complete corrected file, a What was fixed summary, and one " +
+            "consolidated Remember section, and follow the output format exactly."
         },
         {
           role: "user",
@@ -441,7 +691,16 @@ async function generateBatchExplanation({
       max_completion_tokens: MAX_BATCH_COMPLETION_TOKENS
     });
 
-    const rawText = completion.choices?.[0]?.message?.content;
+    const choice = completion.choices?.[0];
+    const rawText = choice?.message?.content;
+
+    if (choice?.finish_reason === "length") {
+      const truncatedError = new Error(
+        "Groq stopped before completing the batch response (token limit)."
+      );
+      truncatedError.code = "GROQ_TRUNCATED";
+      throw truncatedError;
+    }
 
     if (typeof rawText !== "string" || !rawText.trim()) {
       const emptyError = new Error("Groq returned an empty batch response.");
@@ -449,7 +708,16 @@ async function generateBatchExplanation({
       throw emptyError;
     }
 
-    const result = parseBatchExplanationResponse(rawText, errors, language);
+    const result = parseBatchExplanationResponse(
+      rawText,
+      errors,
+      language,
+      {
+        analyzeSource,
+        lineCount: code.split(/\r?\n/).length,
+        maxAdditionalIssues: MAX_ADDITIONAL_ISSUES
+      }
+    );
 
     console.log("[Groq] Batch explanation generated and parsed successfully");
 
@@ -470,5 +738,6 @@ async function generateBatchExplanation({
 module.exports = {
   generateExplanation,
   generateBatchExplanation,
-  parseBatchExplanationResponse
+  parseBatchExplanationResponse,
+  extractConsolidatedSource
 };

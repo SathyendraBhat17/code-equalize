@@ -1,4 +1,3 @@
-
 import * as vscode from 'vscode';
 
 export type ExtractedErrorType =
@@ -6,12 +5,19 @@ export type ExtractedErrorType =
   | 'runtime'
   | 'potential';
 
+export interface RelatedDiagnostic {
+  message: string;
+  lineNumber: number;
+}
+
 export interface ExtractedDiagnostic {
   id: string;
   errorMessage: string;
   lineNumber: number;
   errorType: ExtractedErrorType;
   fileName?: string;
+  /** Cascading diagnostics caused by this same root mistake. */
+  relatedDiagnostics?: RelatedDiagnostic[];
 }
 
 export interface ExtractedError {
@@ -22,6 +28,7 @@ export interface ExtractedError {
   isStaticAnalysis?: boolean;
   errors: ExtractedDiagnostic[];
 }
+
 
 interface ScannerState {
   inBlockComment: boolean;
@@ -330,7 +337,15 @@ function detectUnclosedBraces(
   return findings;
 }
 
-const MAX_EXTRACTED_ERRORS = 12;
+export const MAX_EXTRACTED_ERRORS = 12;
+const MAX_RELATED_DIAGNOSTICS = 10;
+
+export const SUPPORTED_LANGUAGE_IDS = [
+  'java',
+  'python',
+  'c',
+  'cpp'
+];
 
 /**
  * Builds a stable error identity for batch regeneration.
@@ -366,90 +381,305 @@ function withErrorIdentity(
     errorMessage,
     lineNumber,
     errorType,
-    fileName: error.fileName ?? fileName
+    fileName: error.fileName ?? fileName,
+    ...(error.relatedDiagnostics?.length
+      ? { relatedDiagnostics: error.relatedDiagnostics }
+      : {})
   };
 }
 
 /**
- * Removes exact duplicates and obvious same-line cascade noise.
+ * Plain data view of a VS Code diagnostic so the grouping logic can be
+ * unit-tested without the VS Code API.
  */
-function removeDuplicateFindings(
-  errors: ExtractedDiagnostic[]
-): ExtractedDiagnostic[] {
-  const seenExact = new Set<string>();
-  const seenLineMessages = new Set<string>();
-  const result: ExtractedDiagnostic[] = [];
-
-  for (const error of errors) {
-    const exactKey = [
-      error.lineNumber,
-      error.errorType,
-      error.errorMessage.trim().toLowerCase()
-    ].join('|');
-
-    if (seenExact.has(exactKey)) {
-      continue;
-    }
-
-    const lineMessageKey = [
-      error.lineNumber,
-      error.errorMessage.trim().toLowerCase()
-    ].join('|');
-
-    // Drop same-line repeats even when classification differs.
-    if (seenLineMessages.has(lineMessageKey)) {
-      continue;
-    }
-
-    seenExact.add(exactKey);
-    seenLineMessages.add(lineMessageKey);
-    result.push(error);
-  }
-
-  return result;
+export interface DiagnosticInput {
+  message: string;
+  line: number;
+  character: number;
+  isError: boolean;
+  isUnnecessary?: boolean;
+  isDeprecated?: boolean;
+  source?: string;
+  code?: string;
 }
 
 /**
- * Limits cascade floods from compilers while keeping earlier root errors.
+ * Warnings that describe code quality rather than a correctness problem.
+ * Code Equalize is not a general-purpose linter.
  */
-function limitCascadeErrors(
-  errors: ExtractedDiagnostic[]
-): ExtractedDiagnostic[] {
+const NON_CORRECTNESS_PATTERNS: RegExp[] = [
+  /\bunused\b/i,
+  /\bnever (?:used|read|referenced)\b/i,
+  /\bis not accessed\b/i,
+  /\bis declared but (?:its value is )?never\b/i,
+  /\bassigned (?:a value )?but never used\b/i,
+  /\bdefined but not used\b/i,
+  /\bset but not used\b/i,
+  /\bunnecessary\b/i,
+  /\bredundant\b/i,
+  /\bdeprecated\b/i,
+  /\bline too long\b/i,
+  /\bwhitespace\b/i,
+  /\btrailing\b.*\b(?:space|newline)/i,
+  /\bblank line/i,
+  /\bnaming convention\b/i,
+  /\bdocstring\b/i,
+  /\bcould be (?:simplified|final|static|private)\b/i,
+  /\bcan be (?:simplified|replaced|made)\b/i,
+  /\bconsider (?:using|adding|replacing)\b/i,
+  /\bserializable class\b.*\bserialVersionUID\b/i,
+  /\bresource leak\b/i,
+  /\braw type\b/i,
+  /\bmissing (?:module|class|function) docstring\b/i
+];
+
+/** Style-only linter codes (pycodestyle / flake8 / pylint conventions). */
+const STYLE_CODE_PATTERN = /^(?:E[1-3]\d\d|E50\d|W[1-6]\d\d|C\d{4}|R\d{4}|D\d{3})$/;
+
+/**
+ * Returns true when a warning represents a genuine correctness problem
+ * (for example an undefined name or an unsafe operation).
+ */
+export function isMeaningfulDiagnostic(input: DiagnosticInput): boolean {
+  if (input.isError) {
+    return true;
+  }
+
+  if (input.isUnnecessary || input.isDeprecated) {
+    return false;
+  }
+
+  if (input.code && STYLE_CODE_PATTERN.test(input.code)) {
+    return false;
+  }
+
+  return !NON_CORRECTNESS_PATTERNS.some(pattern =>
+    pattern.test(input.message)
+  );
+}
+
+/**
+ * Diagnostics that usually describe the real mistake when a parser
+ * loses track (unclosed delimiter, unterminated string, unexpected EOF).
+ */
+const ROOT_DELIMITER_PATTERNS: RegExp[] = [
+  /was (?:never|not) closed/i,
+  /\bunclosed\b/i,
+  /\bunmatched\b/i,
+  /\bunbalanced\b/i,
+  /missing (?:closing|terminating|matching)/i,
+  /reached end of file while parsing/i,
+  /\bend of input\b/i,
+  /unexpected (?:end of file|EOF)/i,
+  /\bEOF\b.*\b(?:while|in)\b/i,
+  /expected ['"`]?[)\]}]['"`]?/i
+];
+
+const ROOT_STRING_PATTERNS: RegExp[] = [
+  /\bunterminated\b/i,
+  /missing terminating ['"]/i,
+  /\bEOL while scanning\b/i,
+  /\bunclosed (?:string|character|char) literal\b/i
+];
+
+/**
+ * Generic parser messages that commonly appear *because of* an earlier
+ * syntax error rather than as an independent mistake. Indentation errors,
+ * undefined names, and type errors are deliberately NOT listed: they are
+ * kept as independent root causes.
+ */
+const CASCADE_PATTERNS: RegExp[] = [
+  /^expected expression\b/i,
+  /^expected an expression\b/i,
+  /statements must be separated by newlines or semicolons/i,
+  /^unexpected token\b/i,
+  /^expected declaration or statement at end of input/i,
+  /^expected (?:member name|declaration)\b/i,
+  /class, interface, enum,? or record expected/i,
+  /^illegal start of (?:expression|type)/i,
+  /^not a statement$/i,
+  /^invalid syntax\.?$/i,
+  /^syntax error[,:]? (?:insert|delete)\b/i,
+  /^expression expected\b/i,
+  /^declaration expected\b/i
+];
+
+const STRING_CASCADE_WINDOW = 3;
+const DELIMITER_CASCADE_WINDOW = 10;
+
+function normalizeMessage(message: string): string {
+  return message.trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+interface GroupedDiagnostic {
+  message: string;
+  line: number;
+  character: number;
+  isError: boolean;
+  related: RelatedDiagnostic[];
+  rootWindow: number;
+}
+
+/**
+ * Groups cascading parser diagnostics under the root mistake that caused
+ * them and removes duplicates reported by several providers. Independent
+ * mistakes — even on nearby lines — are kept as separate entries.
+ */
+export function groupDiagnostics(
+  inputs: DiagnosticInput[]
+): GroupedDiagnostic[] {
+  const sorted = [...inputs].sort((a, b) =>
+    a.line - b.line ||
+    a.character - b.character ||
+    a.message.localeCompare(b.message)
+  );
+
+  const kept: GroupedDiagnostic[] = [];
+
+  for (const input of sorted) {
+    const normalized = normalizeMessage(input.message);
+
+    // Duplicate of an already kept diagnostic at the same position,
+    // possibly reported by another provider with slightly different text.
+    const duplicate = kept.find(item => {
+      if (item.line !== input.line) {
+        return false;
+      }
+
+      const other = normalizeMessage(item.message);
+
+      return other === normalized ||
+        (
+          item.character === input.character &&
+          (other.includes(normalized) || normalized.includes(other))
+        );
+    });
+
+    if (duplicate) {
+      continue;
+    }
+
+    const isCascade = CASCADE_PATTERNS.some(pattern =>
+      pattern.test(input.message.trim())
+    );
+
+    if (isCascade) {
+      // Attach to the nearest preceding root syntax error whose influence
+      // window covers this line.
+      const root = [...kept].reverse().find(item =>
+        item.rootWindow > 0 &&
+        input.line >= item.line &&
+        input.line - item.line <= item.rootWindow
+      );
+
+      if (root) {
+        if (root.related.length < MAX_RELATED_DIAGNOSTICS) {
+          root.related.push({
+            message: input.message,
+            lineNumber: input.line
+          });
+        }
+        continue;
+      }
+    }
+
+    const rootWindow = ROOT_STRING_PATTERNS.some(pattern =>
+      pattern.test(input.message)
+    )
+      ? STRING_CASCADE_WINDOW
+      : ROOT_DELIMITER_PATTERNS.some(pattern =>
+          pattern.test(input.message)
+        )
+        ? DELIMITER_CASCADE_WINDOW
+        : 0;
+
+    kept.push({
+      message: input.message,
+      line: input.line,
+      character: input.character,
+      isError: input.isError,
+      related: [],
+      rootWindow
+    });
+  }
+
+  return kept;
+}
+
+/**
+ * Limits cascade floods from compilers while keeping errors before
+ * warnings and earlier root errors first.
+ */
+function limitErrors(
+  errors: GroupedDiagnostic[]
+): GroupedDiagnostic[] {
   if (errors.length <= MAX_EXTRACTED_ERRORS) {
     return errors;
   }
 
-  return errors.slice(0, MAX_EXTRACTED_ERRORS);
+  return [...errors]
+    .sort((a, b) =>
+      Number(b.isError) - Number(a.isError) ||
+      a.line - b.line ||
+      a.character - b.character
+    )
+    .slice(0, MAX_EXTRACTED_ERRORS);
+}
+
+function toDiagnosticInput(
+  diagnostic: vscode.Diagnostic
+): DiagnosticInput {
+  const code = diagnostic.code;
+  const codeValue =
+    typeof code === 'string' || typeof code === 'number'
+      ? String(code)
+      : code && typeof code === 'object'
+        ? String(code.value)
+        : undefined;
+
+  return {
+    message: diagnostic.message,
+    line: diagnostic.range.start.line,
+    character: diagnostic.range.start.character,
+    isError:
+      diagnostic.severity === vscode.DiagnosticSeverity.Error,
+    isUnnecessary:
+      diagnostic.tags?.includes(vscode.DiagnosticTag.Unnecessary) ??
+      false,
+    isDeprecated:
+      diagnostic.tags?.includes(vscode.DiagnosticTag.Deprecated) ??
+      false,
+    source: diagnostic.source,
+    code: codeValue
+  };
 }
 
 /**
- * Main error extraction function.
+ * Collects the meaningful problems of one document.
  *
- * Uses compiler/language-server diagnostics as the primary source.
- * Keeps brace/delimiter heuristics only when no diagnostics exist,
- * to avoid duplicating compiler cascade noise.
- * Does not use speculative regex "possible runtime" scanners.
+ * - Uses the document's latest in-memory text (including unsaved edits).
+ * - Uses compiler/language-server diagnostics as the primary source,
+ *   keeping errors and correctness warnings, dropping style/unused hints.
+ * - Groups cascading parser diagnostics under their root cause.
+ * - Uses delimiter heuristics only when no diagnostics exist.
+ *
+ * Returns null for unsupported or empty documents. A supported document
+ * with no diagnostics returns an empty list: whole-source AI analysis
+ * still runs for it.
  */
-export function extractError(): ExtractedError | null {
-  const editor = vscode.window.activeTextEditor;
-
-  if (!editor) {
+export function extractError(
+  document: vscode.TextDocument | undefined =
+    vscode.window.activeTextEditor?.document
+): ExtractedError | null {
+  if (!document) {
     return null;
   }
 
-  const document = editor.document;
   const code = document.getText();
   const language = document.languageId;
 
-  const supported = [
-    'java',
-    'python',
-    'c',
-    'cpp'
-  ];
-
   if (
-    !supported.includes(language) ||
+    !SUPPORTED_LANGUAGE_IDS.includes(language) ||
     !code.trim()
   ) {
     return null;
@@ -457,81 +687,68 @@ export function extractError(): ExtractedError | null {
 
   const fileName = document.fileName.split(/[\\/]/).pop();
 
-  // 1. Collect actual VS Code error diagnostics.
-  const diagnostics =
-    vscode.languages.getDiagnostics(document.uri);
+  // 1. Collect actual VS Code diagnostics for this document only.
+  const diagnostics = vscode.languages
+    .getDiagnostics(document.uri)
+    .filter(diagnostic =>
+      diagnostic.severity === vscode.DiagnosticSeverity.Error ||
+      diagnostic.severity === vscode.DiagnosticSeverity.Warning
+    )
+    .map(toDiagnosticInput)
+    .filter(isMeaningfulDiagnostic);
 
-  const compilerErrors = diagnostics
-  .filter(
-    diagnostic =>
-      diagnostic.severity ===
-        vscode.DiagnosticSeverity.Error ||
-      diagnostic.severity ===
-        vscode.DiagnosticSeverity.Warning
-  )
-  .sort((a, b) => {
-    const priorityA =
-      a.severity === vscode.DiagnosticSeverity.Error ? 0 : 1;
+  const grouped = limitErrors(groupDiagnostics(diagnostics));
 
-    const priorityB =
-      b.severity === vscode.DiagnosticSeverity.Error ? 0 : 1;
-
-    return (
-      priorityA - priorityB ||
-      a.range.start.line - b.range.start.line ||
-      a.message.localeCompare(b.message)
-    );
-  })
-  .map(diagnostic =>
+  const compilerErrors = grouped.map(item =>
     withErrorIdentity(
       {
-        errorMessage: diagnostic.message,
-        lineNumber: diagnostic.range.start.line,
-        errorType: 'diagnostic'
+        errorMessage: item.message,
+        lineNumber: item.line,
+        errorType: 'diagnostic',
+        relatedDiagnostics: item.related
       },
       fileName
     )
   );
 
-  // 2. Only use delimiter heuristics when the language server
-  // reported nothing, to avoid duplicating compiler cascades.
+  // 2. Only use delimiter heuristics when the language server reported
+  // nothing, so they never override reliable compiler diagnostics.
   const syntaxErrors =
-    compilerErrors.length === 0
-      ? detectUnclosedBraces(code, language).map(error =>
-          withErrorIdentity(
-            {
-              errorMessage: error.errorMessage,
-              lineNumber: error.lineNumber,
-              errorType: 'diagnostic'
-            },
-            fileName
+    diagnostics.length === 0
+      ? detectUnclosedBraces(code, language)
+          .slice(0, MAX_EXTRACTED_ERRORS)
+          .map(error =>
+            withErrorIdentity(
+              {
+                errorMessage: error.errorMessage,
+                lineNumber: error.lineNumber,
+                errorType: 'diagnostic'
+              },
+              fileName
+            )
           )
-        )
       : [];
 
-  // 3. Combine, deduplicate, sort, and limit cascade floods.
-  const selectedErrors = limitCascadeErrors(
-  removeDuplicateFindings([
-    ...compilerErrors,
-    ...syntaxErrors
-  ])
-);
-
-const errors = selectedErrors.sort((a, b) =>
-  a.lineNumber - b.lineNumber ||
-  a.errorType.localeCompare(b.errorType) ||
-  a.errorMessage.localeCompare(b.errorMessage)
-);
-
-  if (errors.length === 0) {
-    return null;
-  }
+  // 3. Remove identical IDs and sort deterministically by line.
+  const seenIds = new Set<string>();
+  const errors = [...compilerErrors, ...syntaxErrors]
+    .filter(item => {
+      if (seenIds.has(item.id)) {
+        return false;
+      }
+      seenIds.add(item.id);
+      return true;
+    })
+    .sort((a, b) =>
+      a.lineNumber - b.lineNumber ||
+      a.errorMessage.localeCompare(b.errorMessage)
+    );
 
   return {
-    errorMessage: errors[0].errorMessage,
+    errorMessage: errors[0]?.errorMessage ?? '',
     code,
     language,
-    lineNumber: errors[0].lineNumber,
+    lineNumber: errors[0]?.lineNumber ?? 0,
     isStaticAnalysis: compilerErrors.length === 0,
     errors
   };

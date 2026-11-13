@@ -12,6 +12,7 @@
   ],
   "activationEvents": [
     "onCommand:code-equalize.explain",
+    "onCommand:code-equalize.explainFromEditor",
     "onDebug",
     "onDebugResolve:java",
     "onDebugResolve:debugpy"
@@ -21,9 +22,29 @@
     "commands": [
       {
         "command": "code-equalize.explain",
-        "title": "Explain in My Language"
+        "title": "Explain in My Language",
+        "category": "Code Equalize"
+      },
+      {
+        "command": "code-equalize.explainFromEditor",
+        "title": "Explain with Code Equalize"
       }
-    ]
+    ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "code-equalize.explainFromEditor",
+          "when": "false"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "code-equalize.explainFromEditor",
+          "when": "editorLangId == python || editorLangId == java || editorLangId == c || editorLangId == cpp",
+          "group": "navigation@100"
+        }
+      ]
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",

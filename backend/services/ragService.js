@@ -1,5 +1,6 @@
 const chromaService = require("./chromaService");
 const aiService = require("./aiService");
+const { validateSyntax } = require("./validationService");
 
 const {
   SIMILARITY_THRESHOLD
@@ -186,9 +187,14 @@ const processAllErrors = async ({
   code,
   language,
   targetLanguage,
-  errors
+  errors,
+  fileName,
+  analyzeSource = false
 }) => {
-  if (!Array.isArray(errors) || errors.length === 0) {
+  if (
+    !Array.isArray(errors) ||
+    (errors.length === 0 && !analyzeSource)
+  ) {
     const error = new Error(
       "At least one error is required for batch explanation."
     );
@@ -211,7 +217,11 @@ const processAllErrors = async ({
       item.errorType === "runtime" ||
       item.errorType === "potential"
         ? item.errorType
-        : "diagnostic"
+        : "diagnostic",
+
+    relatedDiagnostics: Array.isArray(item.relatedDiagnostics)
+      ? item.relatedDiagnostics
+      : undefined
   }));
 
   const knowledgeContexts = [];
@@ -223,7 +233,8 @@ const processAllErrors = async ({
     `[RAG] Batch ChromaDB search started for ${normalizedErrors.length} error(s)`
   );
 
-  // Search errors in controlled batches.
+  // Search errors in controlled batches. A ChromaDB failure only removes
+  // supporting context; Groq still analyses the source and diagnostics.
   for (
     let start = 0;
     start < normalizedErrors.length;
@@ -294,16 +305,33 @@ const processAllErrors = async ({
     }`
   );
 
-  // One Groq generation for all errors.
+  // One coordinated Groq generation for the whole file.
   const aiResult = await aiService.generateBatchExplanation({
     code,
     language,
     targetLanguage,
     errors: normalizedErrors,
-    knowledgeContexts
+    knowledgeContexts,
+    fileName,
+    analyzeSource
   });
 
   console.log("[RAG] Batch Groq request completed");
+
+  if (aiResult.noIssues) {
+    console.log("[RAG] Whole-source analysis found no issues");
+
+    return {
+      explanations: [],
+      fix: "",
+      whatWasFixed: "",
+      remember: "",
+      correctionStatus: "none",
+      validation: { status: "unavailable" },
+      noIssues: true,
+      source: "AI"
+    };
+  }
 
   // Index the generated explanations by their original error IDs.
   const generatedById = new Map(
@@ -329,6 +357,8 @@ const processAllErrors = async ({
       error: generated.error,
       lineNumber: item.lineNumber,
       errorType: item.errorType,
+      issueType: generated.issueType || undefined,
+      summary: generated.summary || undefined,
       explanation: generated.explanation,
       source: meta?.source || "AI",
       matchedError: meta?.matchedError,
@@ -336,11 +366,30 @@ const processAllErrors = async ({
     };
   });
 
-  // Store only newly generated knowledge with a safe,
-  // error-specific correction.
-  // Never store the consolidated full-file fix as an individual fix.
+  // Issues Groq inferred from the whole source (never observed at runtime).
+  for (const item of aiResult.additionalIssues || []) {
+    explanations.push({
+      id: item.id,
+      error: item.error,
+      lineNumber: item.lineNumber,
+      errorType: "potential",
+      issueType: item.issueType || undefined,
+      summary: item.summary || undefined,
+      explanation: item.explanation,
+      source: "AI",
+      distance: null
+    });
+  }
+
+  // Store only newly generated knowledge for real diagnostics or observed
+  // runtime errors, with a safe error-specific correction. Never store the
+  // consolidated full-file fix, and never store AI-inferred issues whose
+  // "error" text is model-written rather than a real message.
   for (const item of normalizedErrors) {
-    if (matchMetaById.has(item.id)) {
+    if (
+      matchMetaById.has(item.id) ||
+      item.errorType === "potential"
+    ) {
       continue;
     }
 
@@ -389,14 +438,23 @@ const processAllErrors = async ({
     }
   }
 
+  // Syntax-only check of the corrected file; never executes it.
+  const validation = await validateSyntax(aiResult.fix, language);
+
+  console.log(`[RAG] Corrected-source syntax check: ${validation.status}`);
   console.log("[RAG] Batch pipeline completed");
 
   return {
     explanations,
     fix: aiResult.fix,
+    whatWasFixed: aiResult.whatWasFixed,
     remember: aiResult.remember,
+    correctionStatus: aiResult.correctionStatus,
+    validation,
+    noIssues: false,
     source:
-      acceptedMatches === normalizedErrors.length
+      explanations.length > 0 &&
+      acceptedMatches === explanations.length
         ? "ChromaDB"
         : acceptedMatches > 0
           ? "Mixed"
