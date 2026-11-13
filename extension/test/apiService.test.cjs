@@ -33,7 +33,10 @@ test('batch API sends source and explanation languages as separate fields', asyn
           source: 'AI'
         }],
         fix: 'if divisor == 0: raise ValueError()',
+        whatWasFixed: '- Added a zero check.',
         remember: 'Check the divisor.',
+        correctionStatus: 'complete',
+        validation: { status: 'passed', tool: 'Python ast.parse' },
         source: 'AI'
       })
     };
@@ -45,6 +48,10 @@ test('batch API sends source and explanation languages as separate fields', asyn
     assert.equal(captured.body.language, 'Python');
     assert.equal(captured.body.targetLanguage, 'Hindi');
     assert.equal(result.explanations[0].explanation, 'Hindi explanation');
+    assert.equal(captured.body.analyzeSource, false);
+    assert.equal(result.whatWasFixed, '- Added a zero check.');
+    assert.equal(result.correctionStatus, 'complete');
+    assert.equal(result.validation.status, 'passed');
   } finally {
     global.fetch = originalFetch;
   }

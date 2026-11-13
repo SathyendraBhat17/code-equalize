@@ -2,8 +2,12 @@ const BACKEND_URL = 'http://127.0.0.1:3000/explain';
 const BACKEND_BATCH_URL = 'http://127.0.0.1:3000/explain/all';
 
 const REQUEST_TIMEOUT = 20000;
-const BATCH_REQUEST_TIMEOUT = 90000;
+// Longer than the backend's Groq timeout so the backend can always answer
+// with a result or an explicit error first.
+const BATCH_REQUEST_TIMEOUT = 150000;
 const MAX_RETRIES = 2;
+// A batch request is expensive (one full Groq generation); retry it once.
+const BATCH_MAX_RETRIES = 1;
 const RETRY_DELAY = 500;
 
 export type ErrorType = 'diagnostic' | 'runtime' | 'potential';
@@ -25,11 +29,17 @@ export type BackendResponse = {
   distance?: number | null;
 };
 
+export type RelatedDiagnosticInput = {
+  message: string;
+  lineNumber?: number;
+};
+
 export type BatchErrorInput = {
   id: string;
   error: string;
   lineNumber?: number;
   errorType: ErrorType;
+  relatedDiagnostics?: RelatedDiagnosticInput[];
 };
 
 export type BatchExplainRequest = {
@@ -37,6 +47,12 @@ export type BatchExplainRequest = {
   language: string;
   targetLanguage: string;
   errors: BatchErrorInput[];
+  fileName?: string;
+  /**
+   * When true, Groq analyses the complete source and may report
+   * additional (potential) issues beyond the listed diagnostics.
+   */
+  analyzeSource?: boolean;
 };
 
 export type BatchExplanationItem = {
@@ -44,16 +60,30 @@ export type BatchExplanationItem = {
   error: string;
   lineNumber?: number;
   errorType: ErrorType;
+  issueType?: string;
+  summary?: string;
   explanation: string;
   source: string;
   matchedError?: string;
   distance?: number | null;
 };
 
+export type CorrectionStatus = 'complete' | 'partial' | 'none';
+
+export type SyntaxValidation = {
+  status: 'passed' | 'failed' | 'unavailable';
+  tool?: string;
+  detail?: string;
+};
+
 export type BatchExplainResponse = {
   explanations: BatchExplanationItem[];
   fix: string;
+  whatWasFixed: string;
   remember: string;
+  correctionStatus: CorrectionStatus;
+  validation: SyntaxValidation;
+  noIssues: boolean;
   source: string;
 };
 
@@ -107,12 +137,68 @@ function normalizeErrorType(value: unknown): ErrorType {
   return 'diagnostic';
 }
 
+function optionalText(value: unknown, maxLength: number): string | undefined {
+  return typeof value === 'string' && value.trim()
+    ? value.trim().slice(0, maxLength)
+    : undefined;
+}
+
+function normalizeValidation(value: unknown): SyntaxValidation {
+  const entry =
+    value && typeof value === 'object'
+      ? value as Record<string, unknown>
+      : {};
+
+  const status =
+    entry.status === 'passed' || entry.status === 'failed'
+      ? entry.status
+      : 'unavailable';
+
+  return {
+    status,
+    tool: optionalText(entry.tool, 80),
+    detail: optionalText(entry.detail, 400)
+  };
+}
+
+/**
+ * Defensive: if the whole corrected source is still wrapped in one
+ * Markdown fence, remove only that outer fence. Fence-like lines inside the
+ * program (for example in a docstring) are left untouched.
+ */
+export function stripOuterFence(code: string): string {
+  const lines = code.replace(/\r\n/g, '\n').split('\n');
+
+  while (lines.length > 0 && !lines[lines.length - 1].trim()) {
+    lines.pop();
+  }
+
+  if (
+    lines.length >= 2 &&
+    /^[ \t]*(`{3,})[\w+#.-]*[ \t]*$/.test(lines[0]) &&
+    /^[ \t]*`{3,}[ \t]*$/.test(lines[lines.length - 1])
+  ) {
+    return lines.slice(1, -1).join('\n');
+  }
+
+  return code;
+}
+
+const ADDITIONAL_ISSUE_ID = /^potential\|/;
+const MAX_ADDITIONAL_ISSUES = 10;
+
 /**
  * Validates and normalizes the batch backend response.
+ *
+ * Stable IDs are authoritative: every requested ID must come back exactly
+ * once, duplicates and unknown IDs are rejected, and only clearly marked
+ * source-inferred issues ("potential|...") may be added when whole-source
+ * analysis was requested.
  */
-function validateBatchResponse(
+export function validateBatchResponse(
   result: unknown,
-  expectedIds: string[]
+  expectedIds: string[],
+  allowAdditional = false
 ): BatchExplainResponse {
   if (!result || typeof result !== 'object') {
     throw new Error(
@@ -123,10 +209,6 @@ function validateBatchResponse(
   const response = result as Record<string, unknown>;
 
   if (
-    typeof response.fix !== 'string' ||
-    !response.fix.trim() ||
-    typeof response.remember !== 'string' ||
-    !response.remember.trim() ||
     typeof response.source !== 'string' ||
     !Array.isArray(response.explanations)
   ) {
@@ -135,11 +217,45 @@ function validateBatchResponse(
     );
   }
 
+  if (response.noIssues === true) {
+    if (expectedIds.length > 0 || response.explanations.length > 0) {
+      throw new Error(
+        'The backend reported no issues for a file with detected errors.'
+      );
+    }
+
+    return {
+      explanations: [],
+      fix: '',
+      whatWasFixed: '',
+      remember: '',
+      correctionStatus: 'none',
+      validation: { status: 'unavailable' },
+      noIssues: true,
+      source: response.source
+    };
+  }
+
+  if (
+    typeof response.fix !== 'string' ||
+    !response.fix.trim() ||
+    typeof response.remember !== 'string' ||
+    !response.remember.trim()
+  ) {
+    throw new Error(
+      'The backend returned an incomplete batch explanation response.'
+    );
+  }
+
+
   const explanationsById = new Map<string, BatchExplanationItem>();
+  const additional: BatchExplanationItem[] = [];
 
   for (const item of response.explanations) {
     if (!item || typeof item !== 'object') {
-      continue;
+      throw new Error(
+        'The backend returned an incomplete batch explanation item.'
+      );
     }
 
     const entry = item as Record<string, unknown>;
@@ -159,13 +275,23 @@ function validateBatchResponse(
       );
     }
 
-    if (!expectedIds.includes(entry.id)) {
+    const isExpected = expectedIds.includes(entry.id);
+    const isAdditional =
+      !isExpected &&
+      allowAdditional &&
+      ADDITIONAL_ISSUE_ID.test(entry.id) &&
+      entry.errorType === 'potential';
+
+    if (!isExpected && !isAdditional) {
       throw new Error(
         `The backend returned an unexpected error id=${entry.id}.`
       );
     }
 
-    if (explanationsById.has(entry.id)) {
+    if (
+      explanationsById.has(entry.id) ||
+      additional.some(other => other.id === entry.id)
+    ) {
       throw new Error(
         `The backend returned a duplicate explanation for error id=${entry.id}.`
       );
@@ -173,6 +299,7 @@ function validateBatchResponse(
 
     if (
       entry.lineNumber !== undefined &&
+      entry.lineNumber !== null &&
       (
         typeof entry.lineNumber !== 'number' ||
         !Number.isFinite(entry.lineNumber) ||
@@ -185,7 +312,7 @@ function validateBatchResponse(
       );
     }
 
-    explanationsById.set(entry.id, {
+    const normalized: BatchExplanationItem = {
       id: entry.id,
       error: entry.error,
       lineNumber:
@@ -193,6 +320,8 @@ function validateBatchResponse(
           ? entry.lineNumber
           : undefined,
       errorType: normalizeErrorType(entry.errorType),
+      issueType: optionalText(entry.issueType, 80),
+      summary: optionalText(entry.summary, 400),
       explanation: entry.explanation,
       source: entry.source,
       matchedError:
@@ -204,7 +333,19 @@ function validateBatchResponse(
         Number.isFinite(entry.distance)
           ? entry.distance
           : null
-    });
+    };
+
+    if (isExpected) {
+      explanationsById.set(entry.id, normalized);
+    } else {
+      additional.push(normalized);
+    }
+  }
+
+  if (additional.length > MAX_ADDITIONAL_ISSUES) {
+    throw new Error(
+      'The backend returned more additional issues than allowed.'
+    );
   }
 
   const explanations = expectedIds.map(id => {
@@ -219,10 +360,34 @@ function validateBatchResponse(
     return item;
   });
 
+  if (explanations.length + additional.length === 0) {
+    throw new Error(
+      'The backend response did not contain any explanations.'
+    );
+  }
+
+  const whatWasFixed =
+    typeof response.whatWasFixed === 'string'
+      ? response.whatWasFixed.trim()
+      : '';
+
+  if (!whatWasFixed) {
+    throw new Error(
+      'The backend response is missing the What was fixed summary.'
+    );
+  }
+
   return {
-    explanations,
-    fix: response.fix,
+    explanations: [...explanations, ...additional],
+    fix: stripOuterFence(response.fix),
+    whatWasFixed,
     remember: response.remember,
+    correctionStatus:
+      response.correctionStatus === 'complete'
+        ? 'complete'
+        : 'partial',
+    validation: normalizeValidation(response.validation),
+    noIssues: false,
     source: response.source
   };
 }
@@ -251,7 +416,8 @@ function delay(milliseconds: number): Promise<void> {
 async function postJson(
   url: string,
   body: unknown,
-  timeoutMs: number
+  timeoutMs: number,
+  maxRetries = MAX_RETRIES
 ): Promise<unknown> {
   let lastError: Error = new Error(
     'Unable to connect to the Code Equalize backend.'
@@ -259,7 +425,7 @@ async function postJson(
 
   for (
     let attempt = 0;
-    attempt <= MAX_RETRIES;
+    attempt <= maxRetries;
     attempt++
   ) {
     const controller = new AbortController();
@@ -307,7 +473,7 @@ async function postJson(
 
         if (
           isRetryableStatus(response.status) &&
-          attempt < MAX_RETRIES
+          attempt < maxRetries
         ) {
           shouldRetry = true;
         } else {
@@ -326,7 +492,7 @@ async function postJson(
           'The backend request timed out. Please try again.'
         );
 
-        shouldRetry = attempt < MAX_RETRIES;
+        shouldRetry = attempt < maxRetries;
 
       } else if (shouldRetry) {
         // Preserve the HTTP error that triggered the retry.
@@ -335,7 +501,7 @@ async function postJson(
           'Unable to connect to the Code Equalize backend. Check whether the backend server is running.'
         );
 
-        shouldRetry = attempt < MAX_RETRIES;
+        shouldRetry = attempt < maxRetries;
 
       } else if (error instanceof Error) {
         lastError = error;
@@ -346,7 +512,7 @@ async function postJson(
           'Unable to communicate with the backend.'
         );
 
-        shouldRetry = attempt < MAX_RETRIES;
+        shouldRetry = attempt < maxRetries;
       }
 
     } finally {
@@ -358,7 +524,7 @@ async function postJson(
     }
 
     console.warn(
-      `[Code Equalize] Backend request failed. Retrying (${attempt + 1}/${MAX_RETRIES})...`,
+      `[Code Equalize] Backend request failed. Retrying (${attempt + 1}/${maxRetries})...`,
       lastError.message
     );
 
@@ -407,17 +573,20 @@ export async function sendToBackend(
 }
 
 /**
- * Sends a batch explanation request for all detected errors.
+ * Sends one coordinated batch request for the whole file: the complete
+ * source, all detected errors with stable IDs, and the explanation language.
  */
 export async function sendExplainAll(
   data: BatchExplainRequest
 ): Promise<BatchExplainResponse> {
+  const analyzeSource = data.analyzeSource === true;
+
   if (
     !data.code?.trim() ||
     !data.language?.trim() ||
     !data.targetLanguage?.trim() ||
     !Array.isArray(data.errors) ||
-    data.errors.length === 0
+    (data.errors.length === 0 && !analyzeSource)
   ) {
     throw new Error(
       'Missing required information to generate batch explanations.'
@@ -455,18 +624,25 @@ export async function sendExplainAll(
       code: data.code,
       language: data.language,
       targetLanguage: data.targetLanguage,
+      fileName: data.fileName,
+      analyzeSource,
       errors: data.errors.map(item => ({
         id: item.id,
         error: item.error,
         lineNumber: item.lineNumber,
-        errorType: item.errorType
+        errorType: item.errorType,
+        ...(item.relatedDiagnostics?.length
+          ? { relatedDiagnostics: item.relatedDiagnostics }
+          : {})
       }))
     },
-    BATCH_REQUEST_TIMEOUT
+    BATCH_REQUEST_TIMEOUT,
+    BATCH_MAX_RETRIES
   );
 
   return validateBatchResponse(
     result,
-    data.errors.map(item => item.id)
+    data.errors.map(item => item.id),
+    analyzeSource
   );
 }
